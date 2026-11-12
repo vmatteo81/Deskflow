@@ -204,16 +204,18 @@ mod tests {
 
     #[test]
     fn busy_port_falls_back_to_next() {
-        // Trova due porte libere consecutive, poi occupa la prima.
-        let (busy, port) = loop {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            let p = l.local_addr().unwrap().port();
-            if p < 60000 && TcpListener::bind(("127.0.0.1", p + 1)).is_ok() {
-                break (l, p);
-            }
-        };
+        let busy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = busy.local_addr().unwrap().port();
+        if port > 65000 {
+            return; // nessuno spazio per le porte successive
+        }
         let got = bind_with_fallback(&format!("127.0.0.1:{port}")).unwrap();
-        assert_eq!(got.local_addr().unwrap().port(), port + 1);
+        let got = got.local_addr().unwrap().port();
+        // Una porta diversa e libera tra le successive (altre possono essere già in uso).
+        assert!(
+            got > port && got <= port + 10,
+            "porta {port} occupata, scelta {got}"
+        );
         drop(busy);
     }
 }
