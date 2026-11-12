@@ -33,7 +33,21 @@ C'è un **server** (il PC con mouse e tastiera collegati) e un **client** (il PC
 | Windows 10/11 x64 | `ponte-X.Y.Z-windows-x64.exe` | nessuna: eseguibile unico |
 | Linux Debian/Ubuntu x64 | `ponte_X.Y.Z_amd64.deb` | `sudo apt install ./ponte_*_amd64.deb` |
 
-### 2. Configura
+### 2. Configura (con la finestra)
+
+Avvia Ponte (doppio clic su `ponte.exe`, oppure **Ponte** dal menu applicazioni su Linux).
+Al primo avvio si apre la configurazione guidata:
+
+1. **Sul PC con mouse e tastiera** scegli **Server**, clicca dove si trova l'altro PC
+   (destra, sinistra, sopra, sotto) e premi **Copia** sul codice segreto.
+2. **Sull'altro PC** scegli **Client**, premi **Cerca in rete** e seleziona il server trovato
+   (oppure scrivi il suo IP), incolla il codice segreto.
+3. **Salva e avvia** su entrambi. La finestra mostra lo stato del collegamento, la latenza di rete
+   e il registro delle attività. Dal pulsante **Impostazioni** si cambia tutto in seguito.
+
+La ricerca in rete usa la porta **UDP 24801**; il collegamento vero la **TCP 24800**.
+
+### 2-bis. Configura da terminale (in alternativa)
 
 Sul **server**:
 
@@ -68,16 +82,19 @@ client_side = "right"   # left | right | top | bottom
 ### 4. Avvia
 
 ```sh
-ponte          # usa la `mode` del file di configurazione
+ponte          # apre la finestra (configurazione guidata al primo avvio)
+ponte run      # senza finestra, secondo la `mode` del file di configurazione
 ```
 
-Su Windows basta il doppio clic su `ponte.exe`. Su Linux, per l'avvio automatico con la sessione:
+Su Linux, per l'avvio automatico con la sessione (senza finestra):
 
 ```sh
 systemctl --user enable --now ponte
 ```
 
-Porta usata: **TCP 24800** (aprila nel firewall del server, es. `sudo ufw allow 24800/tcp`).
+Porte usate: **TCP 24800** e **UDP 24801** (ricerca in rete). Aprile nel firewall del server,
+es. `sudo ufw allow 24800/tcp && sudo ufw allow 24801/udp`. Su Windows basta accettare la richiesta
+del firewall al primo avvio.
 
 ## Passare da un PC all'altro
 
@@ -189,7 +206,10 @@ make logo        # rigenera PNG/ICO da assets/logo.svg
 
 ```
 src/
-  main.rs            CLI (init, run, server, client, keys, devices)
+  main.rs            CLI (gui, init, run, server, client, keys, devices)
+  gui.rs             finestra: configurazione guidata e stato (egui)
+  status.rs          stato condiviso motore → finestra, registro attività
+  discovery.rs       ricerca automatica del server in LAN (UDP)
   config.rs          file TOML e validazione
   protocol.rs        messaggi binari
   crypto.rs net.rs   handshake, cifratura, trasporto a bassa latenza

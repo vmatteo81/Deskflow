@@ -62,6 +62,7 @@ impl ClientState {
                     }
                 };
                 self.active = true;
+                crate::status::phase(crate::status::Phase::Controlling);
                 self.inj.move_to(self.pos.0, self.pos.1);
             }
             Msg::Move { dx, dy } if self.active => self.on_move(dx as i32, dy as i32, out),
@@ -87,6 +88,7 @@ impl ClientState {
             Msg::Leave { .. } => {
                 self.release_all();
                 self.active = false;
+                crate::status::phase(crate::status::Phase::Connected);
             }
             Msg::Ping(t) => {
                 let _ = out.send(Msg::Pong(t));
@@ -112,6 +114,7 @@ impl ClientState {
             if self.buttons == 0 {
                 self.release_all();
                 self.active = false;
+                crate::status::phase(crate::status::Phase::Connected);
                 let _ = out.send(Msg::Leave {
                     along: frac_to_along(f),
                 });
@@ -170,7 +173,16 @@ pub fn run(cfg: Config) -> Result<()> {
         let started = Instant::now();
         match session(&cfg, &addr, &mut state, &current, clip.as_ref()) {
             Ok(()) => log::info!("disconnesso dal server"),
-            Err(e) => log::warn!("{addr}: {e:#}"),
+            Err(e) => {
+                log::warn!("{addr}: {e:#}");
+                let msg = format!("{e:#}");
+                crate::status::update(|s| {
+                    s.phase = crate::status::Phase::Connecting;
+                    s.peer.clear();
+                    s.detail = msg;
+                    s.rtt_us = None;
+                });
+            }
         }
         *current.lock().unwrap_or_else(|e| e.into_inner()) = None;
         state.reset();
@@ -206,6 +218,12 @@ pub(crate) fn session(
     current: &Arc<Mutex<Option<Sender<Msg>>>>,
     clip: Option<&ClipHandle>,
 ) -> Result<()> {
+    crate::status::update(|s| {
+        if s.phase != crate::status::Phase::Connecting {
+            s.phase = crate::status::Phase::Connecting;
+            s.detail = format!("connessione a {addr}…");
+        }
+    });
     let stream = connect(addr)?;
     let (mut reader, mut writer) = net::handshake(stream, cfg.secret.as_bytes(), false)?;
     let s = state.inj.screen();
@@ -231,11 +249,13 @@ pub(crate) fn session(
     }
     state.side = side;
     log::info!("connesso a «{name}» ({addr}), questo PC è a {side:?} del server");
+    crate::status::set(crate::status::Phase::Connected, name, addr);
 
     let (tx, rx) = crossbeam_channel::unbounded();
+    let epoch = Instant::now();
     std::thread::Builder::new()
         .name("ponte-writer".into())
-        .spawn(move || net::writer_loop(writer, rx, Instant::now()))?;
+        .spawn(move || net::writer_loop(writer, rx, epoch))?;
     *current.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx.clone());
 
     loop {
@@ -245,7 +265,10 @@ pub(crate) fn session(
                     c.apply_remote(text);
                 }
             }
-            Msg::Pong(_) => {}
+            Msg::Pong(t) => {
+                let rtt = (epoch.elapsed().as_micros() as u64).saturating_sub(t);
+                crate::status::update(|s| s.rtt_us = Some(rtt));
+            }
             msg => state.handle(msg, &tx),
         }
     }

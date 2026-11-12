@@ -1,9 +1,15 @@
 //! Ponte — mouse, tastiera e appunti condivisi tra PC Linux e Windows.
 
+// Su Windows niente console nera all'avvio con doppio clic; da terminale
+// la CLI si riaggancia alla console del genitore (vedi `attach_console`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod client;
 mod clipboard;
 mod config;
 mod crypto;
+mod discovery;
+mod gui;
 // Tabelle Windows usate solo dalla build Windows (testate ovunque).
 #[cfg_attr(not(windows), allow(dead_code))]
 mod keys;
@@ -11,6 +17,7 @@ mod net;
 mod platform;
 mod protocol;
 mod server;
+mod status;
 #[cfg(test)]
 mod tests_e2e;
 
@@ -55,7 +62,9 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Avvia secondo la `mode` del file di configurazione (default)
+    /// Apre la finestra di Ponte (default quando non si passano comandi)
+    Gui,
+    /// Avvia senza finestra secondo la `mode` del file di configurazione
     Run,
     /// Avvia come server (il PC con mouse e tastiera)
     Server,
@@ -80,34 +89,45 @@ enum ModeArg {
 }
 
 fn main() {
+    attach_console();
     let cli = Cli::parse();
     let level = match cli.verbose {
         0 => "info",
         1 => "debug",
         _ => "trace",
     };
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(format!("{level},arboard=error")),
-    )
-    .format_target(false)
-    .init();
+    status::init_logging(level);
     platform::init_process();
 
-    let interactive = cli.cmd.is_none();
+    let gui_mode = matches!(cli.cmd, None | Some(Cmd::Gui));
     if let Err(e) = run(cli) {
         eprintln!("errore: {e:#}");
-        if interactive && cfg!(windows) {
-            // Avvio con doppio clic: non chiudere la console prima di aver letto.
-            eprintln!("\nPremi Invio per chiudere...");
-            let _ = std::io::stdin().read_line(&mut String::new());
+        if gui_mode {
+            platform::show_error(&format!("{e:#}"));
         }
         std::process::exit(1);
     }
 }
 
+/// Windows: con il sottosistema "windows" stdout/stderr non esistono; se
+/// lanciati da un terminale ci si aggancia alla sua console.
+fn attach_console() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn run(cli: Cli) -> Result<()> {
     let path = cli.config.clone().unwrap_or_else(config::default_path);
-    match cli.cmd.unwrap_or(Cmd::Run) {
+    let cmd = match cli.cmd {
+        Some(c) => c,
+        None if gui::available() => Cmd::Gui,
+        None => Cmd::Run,
+    };
+    match cmd {
+        Cmd::Gui => gui::run(path),
         Cmd::Init {
             mode,
             server,
@@ -202,18 +222,8 @@ fn init(
     }
     std::fs::write(path, text)
         .with_context(|| format!("impossibile scrivere {}", path.display()))?;
-    restrict_permissions(path);
+    config::restrict_permissions(path);
     println!("Configurazione creata: {}", path.display());
     println!("Segreto (identico sull'altro PC): {secret}");
     Ok(())
-}
-
-fn restrict_permissions(path: &PathBuf) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    let _ = path;
 }

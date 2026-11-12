@@ -248,7 +248,7 @@ impl Engine {
         self.cfg.edge_switch
             && s.client.is_some()
             && !(self.cfg.lock_while_dragging && s.local_buttons != 0)
-            && s.cooldown_until.map_or(true, |t| Instant::now() >= t)
+            && s.cooldown_until.is_none_or(|t| Instant::now() >= t)
     }
 
     fn on_motion(&self, s: &mut Inner, dx: f64, dy: f64) -> Verdict {
@@ -316,6 +316,7 @@ impl Engine {
     fn go_remote(&self, s: &mut Inner, entry: Entry) {
         let Some(client) = &s.client else { return };
         log::info!("→ controllo a «{}»", client.name);
+        crate::status::phase(crate::status::Phase::Controlling);
         s.return_pos = s.last_abs.or_else(|| self.platform.cursor_pos());
         s.remote = true;
         s.rem = (0.0, 0.0);
@@ -346,6 +347,7 @@ impl Engine {
         }
         log::info!("← controllo al server");
         s.remote = false;
+        crate::status::phase(crate::status::Phase::Connected);
         if exit != Exit::Disconnected {
             let keys: Vec<u16> = s.remote_keys.iter().collect();
             for code in keys {
@@ -405,6 +407,11 @@ impl Engine {
             link.width,
             link.height
         );
+        let peer = link.name.clone();
+        crate::status::update(|st| {
+            st.phase = crate::status::Phase::Connected;
+            st.peer = peer;
+        });
         s.client = Some(link);
     }
 
@@ -415,6 +422,11 @@ impl Engine {
             let name = s.client.take().map(|c| c.name).unwrap_or_default();
             log::info!("client «{name}» disconnesso");
             self.go_local(s, Exit::Disconnected);
+            crate::status::update(|st| {
+                st.phase = crate::status::Phase::Listening;
+                st.peer.clear();
+                st.rtt_us = None;
+            });
         }
     }
 

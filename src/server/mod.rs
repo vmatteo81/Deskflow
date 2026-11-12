@@ -39,6 +39,13 @@ pub fn run(cfg: Config) -> Result<()> {
 
     let listener = TcpListener::bind(&cfg.server.listen)
         .with_context(|| format!("impossibile ascoltare su {}", cfg.server.listen))?;
+    let port = listener
+        .local_addr()
+        .map(|a| a.port())
+        .unwrap_or(crate::protocol::DEFAULT_PORT);
+    let ip = crate::discovery::local_ip().unwrap_or_else(|| "?".into());
+    crate::status::set(crate::status::Phase::Listening, "", format!("{ip}:{port}"));
+    crate::discovery::spawn_responder(cfg.display_name(), port);
     log::info!(
         "server «{}» in ascolto su {} — client a {:?}, hotkey {:?}",
         cfg.display_name(),
@@ -134,6 +141,7 @@ pub(crate) fn handle_conn(
             Ok(Msg::Pong(t)) => {
                 let rtt = (epoch.elapsed().as_micros() as u64).saturating_sub(t);
                 log::trace!("latenza andata/ritorno {rtt} µs");
+                crate::status::update(|s| s.rtt_us = Some(rtt));
             }
             Ok(other) => log::debug!("messaggio inatteso dal client: {other:?}"),
             Err(e) => break Err(e),

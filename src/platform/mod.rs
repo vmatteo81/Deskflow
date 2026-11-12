@@ -52,6 +52,14 @@ pub trait Injector: Send {
     fn key(&mut self, code: u16, down: bool);
 }
 
+/// Mostra un errore bloccante (finestra di dialogo su Windows, stderr altrove).
+pub fn show_error(msg: &str) {
+    #[cfg(windows)]
+    windows::message_box("Ponte", msg);
+    #[cfg(not(windows))]
+    let _ = msg;
+}
+
 /// Prepara il processo (DPI awareness su Windows).
 pub fn init_process() {
     #[cfg(windows)]

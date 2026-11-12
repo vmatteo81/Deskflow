@@ -33,6 +33,19 @@ use crate::keys::{self, KeySet, WinKey};
 use crate::protocol::Button;
 use crate::server::engine::{Engine, Input, Verdict};
 
+pub fn message_box(title: &str, text: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let wide = |s: &str| {
+        s.encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    let (t, m) = (wide(title), wide(text));
+    unsafe {
+        MessageBoxW(null_mut(), m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONERROR);
+    }
+}
+
 pub fn init_process() {
     // Coordinate in pixel fisici anche con scaling al 125/150%.
     unsafe {

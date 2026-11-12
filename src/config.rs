@@ -150,6 +150,32 @@ impl Config {
     }
 }
 
+/// Scrive la configurazione (leggibile solo dall'utente su Linux).
+pub fn save(path: &Path, cfg: &Config) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("impossibile creare {}", dir.display()))?;
+    }
+    let body = toml::to_string_pretty(cfg)?;
+    let text = format!(
+        "# Configurazione di Ponte (modificabile anche dalla finestra Impostazioni)\n\n{body}"
+    );
+    std::fs::write(path, text)
+        .with_context(|| format!("impossibile scrivere {}", path.display()))?;
+    restrict_permissions(path);
+    Ok(())
+}
+
+pub fn restrict_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 pub fn hostname() -> String {
     std::env::var("COMPUTERNAME")
         .ok()
@@ -226,6 +252,21 @@ mod tests {
         c.validate().unwrap();
         assert!(c.clipboard.enabled);
         assert!(c.server.edge_switch);
+    }
+
+    #[test]
+    fn save_and_reload() {
+        let dir = std::env::temp_dir().join(format!("ponte-test-{}", std::process::id()));
+        let path = dir.join("ponte.toml");
+        let mut c: Config = toml::from_str(&template(Mode::Server, &"cd".repeat(32), "")).unwrap();
+        c.server.client_side = Side::Top;
+        c.name = Some("fisso".into());
+        save(&path, &c).unwrap();
+        let back = Config::load(&path).unwrap();
+        assert_eq!(back.server.client_side, Side::Top);
+        assert_eq!(back.name.as_deref(), Some("fisso"));
+        assert_eq!(back.secret, c.secret);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
