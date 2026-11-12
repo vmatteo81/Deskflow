@@ -108,6 +108,9 @@ struct App {
     error: Option<String>,
     copied_at: Option<f64>,
     frames: u32,
+    /// Nome del server ricevuto con l'abbinamento.
+    paired_server: Option<String>,
+    fw_checked: f64,
 }
 
 fn setup_style(ctx: &egui::Context) {
@@ -194,6 +197,8 @@ impl App {
             error: None,
             copied_at: None,
             frames: 0,
+            paired_server: None,
+            fw_checked: -100.0,
         };
         if std::env::var("PONTE_SCREENSHOT_MODE").as_deref() == Ok("client") {
             app.form.mode = Mode::Client;
@@ -208,6 +213,10 @@ impl App {
                 }
                 Err(e) => app.error = Some(format!("{e:#}")),
             }
+        }
+        let auto = app.cfg.as_ref().is_none_or(|c| c.update.auto_check);
+        if auto && std::env::var_os("PONTE_SCREENSHOT").is_none() {
+            crate::update::spawn_periodic();
         }
         app
     }
@@ -268,6 +277,9 @@ impl App {
         cfg.server.edge_switch = f.edge_switch;
         cfg.client.server = f.server.trim().to_string();
         cfg.clipboard.enabled = f.clipboard;
+        if let Some(n) = &self.paired_server {
+            cfg.client.server_name = Some(n.clone());
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -396,6 +408,7 @@ impl eframe::App for App {
                         log::info!("abbinato con «{server_name}»");
                         self.form.secret = secret;
                         self.form.code.clear();
+                        self.paired_server = Some(server_name).filter(|n| !n.is_empty());
                         self.save_and_start();
                     }
                     Err(e) => self.error = Some(format!("{e:#}")),
@@ -427,9 +440,12 @@ impl eframe::App for App {
                 {
                     area = area.vertical_scroll_offset(off);
                 }
-                area.show(ui, |ui| match self.view {
-                    View::Setup => self.setup_view(ui),
-                    View::Status => self.status_view(ui),
+                area.show(ui, |ui| {
+                    update_banner(ui);
+                    match self.view {
+                        View::Setup => self.setup_view(ui),
+                        View::Status => self.status_view(ui),
+                    }
                 });
             });
     }
@@ -1095,6 +1111,15 @@ impl App {
             });
 
         if server {
+            let now = ui.input(|i| i.time);
+            if now - self.fw_checked > 30.0 {
+                self.fw_checked = now;
+                crate::firewall::refresh();
+            }
+            firewall_card(ui);
+        }
+
+        if server {
             let waiting = matches!(st.phase, Phase::Listening | Phase::Starting);
             if waiting {
                 section(ui, "Abbina un nuovo PC");
@@ -1134,7 +1159,21 @@ impl App {
                     ui.end_row();
                     if server {
                         k(ui, "Porta");
-                        ui.label(cfg.server.listen.rsplit(':').next().unwrap_or("24800"));
+                        let configured = cfg
+                            .server
+                            .listen
+                            .rsplit(':')
+                            .next()
+                            .unwrap_or("24800")
+                            .to_string();
+                        match st.listen_port {
+                            Some(p) if p.to_string() != configured => ui.label(
+                                RichText::new(format!("{p}  (la {configured} era occupata)"))
+                                    .color(pal::AMBER),
+                            ),
+                            Some(p) => ui.label(p.to_string()),
+                            None => ui.label(configured),
+                        };
                         ui.end_row();
                         k(ui, "Altro PC");
                         ui.label(format!("lato {}", side_name(cfg.server.client_side)));
@@ -1226,10 +1265,132 @@ impl App {
                 if ui.button("Esci").clicked() {
                     std::process::exit(0);
                 }
-                hint(ui, "Chiudendo la finestra la condivisione si ferma.");
             });
         });
+        hint(ui, "Chiudendo la finestra la condivisione si ferma.");
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            hint(ui, format!("Ponte {}", crate::update::CURRENT));
+            if ui.small_button("Controlla aggiornamenti").clicked() {
+                crate::update::check(true);
+            }
+        });
     }
+}
+
+/// Avviso firewall sul server, con il pulsante per autorizzare la rete locale.
+fn firewall_card(ui: &mut egui::Ui) {
+    use crate::firewall::Status;
+    let st = crate::firewall::status();
+    if matches!(st, Status::Ok | Status::Unknown) {
+        return;
+    }
+    let color = if matches!(st, Status::Failed(_)) {
+        pal::RED
+    } else {
+        pal::AMBER
+    };
+    Frame::new()
+        .fill(color.gamma_multiply(0.10))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.6)))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Il firewall potrebbe bloccare l'altro PC").size(16.0).strong());
+            let what = if cfg!(windows) { "il firewall di Windows" } else { "ufw" };
+            hint(
+                ui,
+                format!(
+                    "Per ricevere il collegamento serve consentire Ponte su {what}, solo dalla rete locale. \
+                     Si fa una volta sola e chiede i permessi di amministratore."
+                ),
+            );
+            if let Status::Failed(msg) = &st {
+                ui.label(RichText::new(msg).color(pal::RED));
+            }
+            if st == Status::Applying {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label("Conferma la richiesta di autorizzazione…");
+                });
+            } else {
+                let btn = egui::Button::new(RichText::new("Consenti in rete locale").strong().color(Color32::WHITE))
+                    .fill(pal::INDIGO);
+                if ui.add(btn).clicked() {
+                    crate::firewall::allow_lan();
+                }
+            }
+        });
+    ui.add_space(8.0);
+}
+
+/// Riquadro in alto con lo stato degli aggiornamenti.
+fn update_banner(ui: &mut egui::Ui) {
+    use crate::update::State;
+    let state = crate::update::state();
+    let (color, show) = match &state {
+        State::Available(_) | State::Downloading { .. } | State::Installing(_) => (pal::CYAN, true),
+        State::UpToDate | State::Checking => (pal::GREEN, true),
+        State::Failed(_) => (pal::RED, true),
+        State::Idle => (pal::MUTED, false),
+    };
+    if !show {
+        return;
+    }
+    Frame::new()
+        .fill(color.gamma_multiply(0.10))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.6)))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match state {
+                State::Available(rel) => {
+                    ui.label(RichText::new(format!("Nuova versione {} disponibile", rel.version)).size(16.0).strong());
+                    hint(ui, format!("Hai la {}. L'aggiornamento si installa e riavvia Ponte da solo.", crate::update::CURRENT));
+                    ui.horizontal(|ui| {
+                        let btn = egui::Button::new(RichText::new("Aggiorna ora").strong().color(Color32::WHITE)).fill(pal::INDIGO);
+                        if ui.add(btn).clicked() {
+                            crate::update::install(rel.clone());
+                        }
+                        ui.hyperlink_to("Novità", &rel.page);
+                    });
+                }
+                State::Downloading { version, done, total } => {
+                    ui.label(format!("Scaricamento della versione {version}…"));
+                    let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                    ui.add(egui::ProgressBar::new(frac).show_percentage());
+                }
+                State::Installing(version) => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new());
+                        ui.label(format!("Installazione della versione {version}…"));
+                    });
+                    if cfg!(target_os = "linux") {
+                        hint(ui, "Inserisci la password nella finestra di sistema per completare l'installazione.");
+                    }
+                }
+                State::Checking => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new());
+                        ui.label("Controllo aggiornamenti…");
+                    });
+                }
+                State::UpToDate => {
+                    ui.label(RichText::new(format!("Hai già l'ultima versione ({}).", crate::update::CURRENT)).color(pal::GREEN));
+                }
+                State::Failed(msg) => {
+                    ui.label(RichText::new("Aggiornamento non riuscito").color(pal::RED).strong());
+                    hint(ui, msg);
+                    if ui.small_button("Riprova").clicked() {
+                        crate::update::check(true);
+                    }
+                }
+                State::Idle => {}
+            }
+        });
+    ui.add_space(8.0);
 }
 
 /// Riga cliccabile di un server trovato in rete: nome e IP.
@@ -1350,7 +1511,7 @@ fn error_hint(detail: &str) -> Option<&'static str> {
         Some("Installa il pacchetto .deb di Ponte (regola udev) ed esci e rientra nella sessione.")
     } else if detail.contains("ascoltare") || detail.contains("in use") || detail.contains("10048")
     {
-        Some("La porta è già usata: forse Ponte è già aperto in un'altra finestra o come servizio.")
+        Some("La porta è già usata: forse Ponte è già aperto in un'altra finestra o come servizio (systemctl --user stop ponte).")
     } else {
         None
     }

@@ -27,6 +27,8 @@ pub struct Status {
     /// Dettaglio (indirizzo, messaggio d'errore, ...).
     pub detail: String,
     pub rtt_us: Option<u64>,
+    /// Porta TCP effettiva del server.
+    pub listen_port: Option<u16>,
 }
 
 static STATUS: Mutex<Status> = Mutex::new(Status {
@@ -35,6 +37,7 @@ static STATUS: Mutex<Status> = Mutex::new(Status {
     peer_addr: String::new(),
     detail: String::new(),
     rtt_us: None,
+    listen_port: None,
 });
 static LOGS: Mutex<VecDeque<(log::Level, String)>> = Mutex::new(VecDeque::new());
 static REPAINT: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();

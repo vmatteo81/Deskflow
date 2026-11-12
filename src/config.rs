@@ -29,6 +29,21 @@ pub struct Config {
     pub client: ClientConfig,
     #[serde(default)]
     pub clipboard: ClipboardConfig,
+    #[serde(default)]
+    pub update: UpdateConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateConfig {
+    /// Controlla da solo se su GitHub c'è una versione nuova.
+    pub auto_check: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self { auto_check: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -73,6 +88,8 @@ pub struct ClientConfig {
     pub server: String,
     /// Risoluzione totale del desktop, se il rilevamento automatico sbaglia.
     pub screen: Option<[u32; 2]>,
+    /// Nome del server abbinato: serve a ritrovarlo se cambia IP o porta.
+    pub server_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

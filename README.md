@@ -30,8 +30,17 @@ C'è un **server** (il PC con mouse e tastiera collegati) e un **client** (il PC
 
 | Sistema | File | Installazione |
 |---|---|---|
-| Windows 10/11 x64 | `ponte-X.Y.Z-windows-x64.exe` | nessuna: eseguibile unico |
+| Windows 10/11 x64 | `ponte-X.Y.Z-windows-x64.exe` | nessuna: eseguibile unico (mettilo in una cartella fissa) |
 | Linux Debian/Ubuntu x64 | `ponte_X.Y.Z_amd64.deb` | `sudo apt install ./ponte_*_amd64.deb` |
+
+Su Ubuntu il doppio clic sul `.deb` apre App Center, che installa la prima volta ma **non sa
+aggiornare** i pacchetti scaricati a mano: usa il comando `apt` qui sopra.
+
+**Aggiornamenti automatici:** dalla 0.4.0 Ponte controlla da solo le nuove versioni e mostra
+**Aggiorna ora**. Su Windows sostituisce l'eseguibile e si riavvia; su Linux installa il `.deb`
+chiedendo la password nella finestra di sistema. Il file scaricato è verificato con lo SHA-256
+pubblicato nella Release. Da terminale: `ponte update`. Per disattivare il controllo:
+`[update] auto_check = false`.
 
 ### 2. Configura (con la finestra)
 
@@ -102,9 +111,18 @@ Su Linux, per l'avvio automatico con la sessione (senza finestra):
 systemctl --user enable --now ponte
 ```
 
-Porte usate: **TCP 24800** e **UDP 24801** (ricerca in rete). Aprile nel firewall del server,
-es. `sudo ufw allow 24800/tcp && sudo ufw allow 24801/udp`. Su Windows basta accettare la richiesta
-del firewall al primo avvio.
+### Porte e firewall
+
+- **TCP 24800** per il collegamento, **UDP 24801** per la ricerca in rete.
+- Se la 24800 è occupata (spesso da Synergy, Barrier o Deskflow, che usano la stessa porta) il
+  server passa da solo alla prima libera fino alla **24810**, e la ricerca in rete annuncia quella
+  giusta. Il client, se non trova più il server, lo ricerca in rete per IP o per nome e si ricollega.
+- **Firewall:** se serve, la finestra del server mostra **Consenti in rete locale**. Con un solo
+  permesso di amministratore crea la regola che accetta connessioni **solo dalla rete locale**:
+  - Windows: regola «Ponte (LAN)» sul programma, valida anche se la Wi-Fi è marcata come rete
+    pubblica, e rimozione delle regole di blocco create premendo «Annulla» sull'avviso di sistema;
+  - Linux: solo se `ufw` è attivo (su Ubuntu è spento di default), apre le porte alla sottorete locale.
+- Il client non ha bisogno di regole: è lui ad aprire la connessione.
 
 ## Passare da un PC all'altro
 
@@ -221,6 +239,8 @@ src/
   status.rs          stato condiviso motore → finestra, registro attività
   discovery.rs       ricerca automatica del server in LAN (UDP), IP locali
   pairing.rs         abbinamento con codice di 6 cifre (SPAKE2)
+  update.rs          aggiornamenti automatici dalle Release GitHub
+  firewall.rs        regole firewall per la rete locale (Windows, ufw)
   config.rs          file TOML e validazione
   protocol.rs        messaggi binari
   crypto.rs net.rs   handshake, cifratura, trasporto a bassa latenza

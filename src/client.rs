@@ -166,7 +166,7 @@ pub fn run(cfg: Config) -> Result<()> {
         None
     };
 
-    let addr = cfg.server_addr();
+    let mut addr = cfg.server_addr();
     let mut backoff = Duration::from_millis(500);
     loop {
         let started = Instant::now();
@@ -174,6 +174,23 @@ pub fn run(cfg: Config) -> Result<()> {
             Ok(()) => log::info!("disconnesso dal server"),
             Err(e) => {
                 log::warn!("{addr}: {e:#}");
+                let unreachable = format!("{e:#}").contains("non raggiungibile");
+                if unreachable {
+                    let host = addr
+                        .rsplit_once(':')
+                        .map(|(h, _)| h)
+                        .unwrap_or(&addr)
+                        .to_string();
+                    if let Some(found) =
+                        crate::discovery::rediscover(&host, cfg.client.server_name.as_deref())
+                    {
+                        if found != addr {
+                            log::info!("server ritrovato in rete a {found}");
+                            addr = found;
+                            continue;
+                        }
+                    }
+                }
                 let msg = format!("{e:#}");
                 crate::status::update(|s| {
                     s.phase = crate::status::Phase::Connecting;

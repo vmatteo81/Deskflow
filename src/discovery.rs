@@ -142,6 +142,52 @@ pub fn local_ips() -> Vec<String> {
     ips.iter().map(|ip| ip.to_string()).collect()
 }
 
+/// Sottoreti locali in formato CIDR (es. "192.168.1.0/24"), per il firewall.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn local_subnets() -> Vec<String> {
+    let mut nets = Vec::new();
+    if let Ok(list) = if_addrs::get_if_addrs() {
+        for itf in list {
+            if itf.is_loopback()
+                || itf.is_link_local()
+                || !itf.is_oper_up()
+                || is_virtual(&itf.name)
+            {
+                continue;
+            }
+            if let if_addrs::IfAddr::V4(v4) = itf.addr {
+                let net = subnet(v4.ip, v4.prefixlen);
+                if !nets.contains(&net) {
+                    nets.push(net);
+                }
+            }
+        }
+    }
+    nets
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn subnet(ip: Ipv4Addr, prefix: u8) -> String {
+    let prefix = prefix.min(32);
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    format!("{}/{prefix}", Ipv4Addr::from(u32::from(ip) & mask))
+}
+
+/// Trova un server già noto anche se ha cambiato porta (stesso IP) o
+/// indirizzo (stesso nome).
+pub fn rediscover(host: &str, name: Option<&str>) -> Option<String> {
+    let found = scan(Duration::from_millis(1200));
+    found
+        .iter()
+        .find(|f| f.addr.rsplit_once(':').map(|(h, _)| h) == Some(host))
+        .or_else(|| name.and_then(|n| found.iter().find(|f| f.name == n)))
+        .map(|f| f.addr.clone())
+}
+
 /// IP principale con cui questo PC è raggiungibile in LAN.
 pub fn local_ip() -> Option<String> {
     local_ips().into_iter().next()
@@ -172,6 +218,9 @@ mod tests {
             assert!(!ip.is_loopback() && !ip.is_unspecified());
         }
         assert!(is_virtual("docker0") && is_virtual("vEthernet (WSL)") && !is_virtual("wlo1"));
+        assert_eq!(subnet(Ipv4Addr::new(192, 168, 1, 37), 24), "192.168.1.0/24");
+        assert_eq!(subnet(Ipv4Addr::new(28, 5, 1, 166), 24), "28.5.1.0/24");
+        assert_eq!(subnet(Ipv4Addr::new(10, 1, 2, 3), 8), "10.0.0.0/8");
     }
 
     #[test]

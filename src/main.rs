@@ -9,6 +9,7 @@ mod clipboard;
 mod config;
 mod crypto;
 mod discovery;
+mod firewall;
 mod gui;
 // Tabelle Windows usate solo dalla build Windows (testate ovunque).
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -21,6 +22,7 @@ mod server;
 mod status;
 #[cfg(test)]
 mod tests_e2e;
+mod update;
 
 use std::path::PathBuf;
 
@@ -84,6 +86,8 @@ enum Cmd {
         #[arg(long)]
         code: String,
     },
+    /// Scarica e installa l'ultima versione da GitHub
+    Update,
     /// Elenca i nomi dei tasti utilizzabili nelle hotkey
     Keys,
     /// Mostra i dispositivi di input rilevati (Linux)
@@ -108,6 +112,7 @@ fn main() {
     };
     status::init_logging(level);
     platform::init_process();
+    update::cleanup_previous();
 
     let gui_mode = matches!(cli.cmd, None | Some(Cmd::Gui));
     if let Err(e) = run(cli) {
@@ -145,6 +150,7 @@ fn run(cli: Cli) -> Result<()> {
             force,
         } => init(&path, mode, &server, secret, force),
         Cmd::Pair { server, code } => pair(&path, &server, &code),
+        Cmd::Update => update::update_cli(),
         Cmd::ConfigPath => {
             println!("{}", path.display());
             Ok(())
@@ -254,6 +260,7 @@ fn pair(path: &std::path::Path, server: &str, code: &str) -> Result<()> {
     let addr = cfg.server_addr();
     let (secret, server_name) = pairing::pair(&addr, code, &cfg.display_name())?;
     cfg.secret = secret;
+    cfg.client.server_name = Some(server_name.clone()).filter(|n| !n.is_empty());
     cfg.validate()?;
     config::save(path, &cfg)?;
     println!(
