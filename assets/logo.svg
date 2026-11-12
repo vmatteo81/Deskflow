@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Ponte</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#1B1F4A"/>
+      <stop offset="1" stop-color="#0A0D24"/>
+    </linearGradient>
+    <linearGradient id="arc" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8B5CF6"/>
+      <stop offset="0.5" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="10" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect x="16" y="16" width="480" height="480" rx="116" fill="url(#bg)"/>
+  <rect x="16.5" y="16.5" width="479" height="479" rx="115.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
+
+  <!-- arco del ponte -->
+  <path d="M136 300 C 150 150, 362 150, 376 300" fill="none" stroke="url(#arc)" stroke-width="30"
+        stroke-linecap="round" filter="url(#glow)"/>
+
+  <!-- due schermi -->
+  <rect x="68" y="300" width="136" height="96" rx="20" fill="#8B5CF6"/>
+  <rect x="88" y="318" width="96" height="60" rx="9" fill="#0A0D24" fill-opacity="0.55"/>
+  <rect x="308" y="300" width="136" height="96" rx="20" fill="#22D3EE"/>
+  <rect x="328" y="318" width="96" height="60" rx="9" fill="#0A0D24" fill-opacity="0.55"/>
+  <rect x="114" y="408" width="44" height="12" rx="6" fill="#8B5CF6" fill-opacity="0.7"/>
+  <rect x="354" y="408" width="44" height="12" rx="6" fill="#22D3EE" fill-opacity="0.7"/>
+
+  <!-- cursore che attraversa -->
+  <path d="M238 92 L238 196 L262 173 L281 214 L300 205 L281 165 L314 165 Z"
+        fill="#FFFFFF" stroke="#0A0D24" stroke-width="8" stroke-linejoin="round"/>
+</svg>

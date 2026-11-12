@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ponte
+GenericName=Mouse e tastiera condivisi
+Comment=Usa mouse, tastiera e appunti di questo PC su un altro PC
+Exec=ponte run
+Icon=ponte
+Terminal=true
+Categories=Utility;Network;
+Keywords=mouse;keyboard;kvm;clipboard;share;

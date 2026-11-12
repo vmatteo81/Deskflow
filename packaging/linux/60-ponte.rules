@@ -1,0 +1,3 @@
+# Ponte: accesso a /dev/uinput per l'utente della sessione attiva (client)
+# e per il gruppo input.
+KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess", GROUP="input", MODE="0660"

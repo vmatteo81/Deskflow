@@ -1,0 +1,13 @@
+[Unit]
+Description=Ponte - mouse, tastiera e appunti condivisi
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/ponte run
+Restart=on-failure
+RestartSec=2
+Nice=-5
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,67 @@
+name: Release
+
+# Pubblica una Release con .deb e .exe quando si fa push di un tag vX.Y.Z
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag e versione di Cargo.toml coincidono
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "${GITHUB_REF_NAME#v}" != "$CARGO_VERSION" ]; then
+            echo "::error::il tag $GITHUB_REF_NAME non corrisponde a version = $CARGO_VERSION in Cargo.toml"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - name: Toolchain Windows (mingw-w64)
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      - name: Build .deb ed .exe
+        run: ./scripts/build-release.sh
+
+      - name: Checksum
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Artefatti del workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponte-${{ github.ref_name }}
+          path: dist/*
+
+      - name: Pubblica la Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Download
+
+            | Sistema | File |
+            |---|---|
+            | **Windows** 10/11 x64 | `ponte-*-windows-x64.exe`: eseguibile unico, nessuna installazione |
+            | **Linux** Debian/Ubuntu x64 | `ponte_*_amd64.deb`: `sudo apt install ./ponte_*_amd64.deb` |
+
+            Configurazione rapida: vedi il [README](https://github.com/${{ github.repository }}#come-si-usa).
+            Verifica integrità: `sha256sum -c SHA256SUMS.txt`
