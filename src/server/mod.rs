@@ -46,6 +46,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let ip = crate::discovery::local_ip().unwrap_or_else(|| "?".into());
     crate::status::set(crate::status::Phase::Listening, "", format!("{ip}:{port}"));
     crate::discovery::spawn_responder(cfg.display_name(), port);
+    crate::pairing::current_code();
     log::info!(
         "server «{}» in ascolto su {} — client a {:?}, hotkey {:?}",
         cfg.display_name(),
@@ -90,6 +91,11 @@ pub(crate) fn handle_conn(
     side: crate::protocol::Side,
 ) -> Result<()> {
     let peer = stream.peer_addr()?;
+    let mut stream = stream;
+    net::tune(&stream)?;
+    if let net::Incoming::Pair = net::read_magic(&mut stream)? {
+        return crate::pairing::serve(stream, &String::from_utf8_lossy(secret), name);
+    }
     let close_handle = stream.try_clone()?;
     let (mut reader, mut writer) = net::handshake(stream, secret, true)?;
     let hello = reader
@@ -123,6 +129,7 @@ pub(crate) fn handle_conn(
     engine.attach(ClientLink {
         id,
         tx,
+        addr: peer.ip().to_string(),
         name: client_name,
         width,
         height,

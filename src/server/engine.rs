@@ -63,6 +63,8 @@ pub struct ClientLink {
     pub id: u64,
     pub tx: Sender<Msg>,
     pub name: String,
+    /// IP del client.
+    pub addr: String,
     pub width: u32,
     pub height: u32,
     /// Copia del socket per chiuderlo se arriva un altro client.
@@ -407,10 +409,11 @@ impl Engine {
             link.width,
             link.height
         );
-        let peer = link.name.clone();
+        let (peer, peer_addr) = (link.name.clone(), link.addr.clone());
         crate::status::update(|st| {
             st.phase = crate::status::Phase::Connected;
             st.peer = peer;
+            st.peer_addr = peer_addr;
         });
         s.client = Some(link);
     }
@@ -425,6 +428,7 @@ impl Engine {
             crate::status::update(|st| {
                 st.phase = crate::status::Phase::Listening;
                 st.peer.clear();
+                st.peer_addr.clear();
                 st.rtt_us = None;
             });
         }
@@ -544,6 +548,7 @@ mod tests {
             id: 1,
             tx,
             name: "c".into(),
+            addr: "10.0.0.2".into(),
             width: 1280,
             height: 720,
             stream: None,

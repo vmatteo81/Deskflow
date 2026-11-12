@@ -14,6 +14,7 @@ mod gui;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod keys;
 mod net;
+mod pairing;
 mod platform;
 mod protocol;
 mod server;
@@ -73,6 +74,15 @@ enum Cmd {
         /// Indirizzo del server, sovrascrive la configurazione
         #[arg(long)]
         server: Option<String>,
+    },
+    /// Abbina questo PC (client) a un server con il codice di 6 cifre
+    Pair {
+        /// Indirizzo del server (IP o nome, porta opzionale)
+        #[arg(long)]
+        server: String,
+        /// Codice di 6 cifre mostrato dal server
+        #[arg(long)]
+        code: String,
     },
     /// Elenca i nomi dei tasti utilizzabili nelle hotkey
     Keys,
@@ -134,6 +144,7 @@ fn run(cli: Cli) -> Result<()> {
             secret,
             force,
         } => init(&path, mode, &server, secret, force),
+        Cmd::Pair { server, code } => pair(&path, &server, &code),
         Cmd::ConfigPath => {
             println!("{}", path.display());
             Ok(())
@@ -225,5 +236,30 @@ fn init(
     config::restrict_permissions(path);
     println!("Configurazione creata: {}", path.display());
     println!("Segreto (identico sull'altro PC): {secret}");
+    Ok(())
+}
+
+fn pair(path: &std::path::Path, server: &str, code: &str) -> Result<()> {
+    let mut cfg = if path.exists() {
+        Config::load(path)?
+    } else {
+        toml::from_str(&config::template(
+            Mode::Client,
+            &crypto::generate_secret(),
+            server,
+        ))?
+    };
+    cfg.mode = Mode::Client;
+    cfg.client.server = server.to_string();
+    let addr = cfg.server_addr();
+    let (secret, server_name) = pairing::pair(&addr, code, &cfg.display_name())?;
+    cfg.secret = secret;
+    cfg.validate()?;
+    config::save(path, &cfg)?;
+    println!(
+        "Abbinato con «{server_name}» ({addr}). Configurazione: {}",
+        path.display()
+    );
+    println!("Avvia con:  ponte run");
     Ok(())
 }

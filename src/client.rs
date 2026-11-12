@@ -2,7 +2,6 @@
 //! (nessun passaggio intermedio = latenza minima). Tiene un cursore virtuale
 //! per sapere quando l'utente esce dal bordo di ritorno.
 
-use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -179,6 +178,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 crate::status::update(|s| {
                     s.phase = crate::status::Phase::Connecting;
                     s.peer.clear();
+                    s.peer_addr.clear();
                     s.detail = msg;
                     s.rtt_us = None;
                 });
@@ -191,23 +191,6 @@ pub fn run(cfg: Config) -> Result<()> {
         }
         std::thread::sleep(backoff);
         backoff = (backoff * 2).min(Duration::from_secs(5));
-    }
-}
-
-fn connect(addr: &str) -> Result<TcpStream> {
-    let mut last = None;
-    for a in addr
-        .to_socket_addrs()
-        .with_context(|| format!("indirizzo non valido: {addr}"))?
-    {
-        match TcpStream::connect_timeout(&a, Duration::from_secs(3)) {
-            Ok(s) => return Ok(s),
-            Err(e) => last = Some(e),
-        }
-    }
-    match last {
-        Some(e) => Err(e).context("server non raggiungibile"),
-        None => bail!("nessun indirizzo per {addr}"),
     }
 }
 
@@ -224,7 +207,11 @@ pub(crate) fn session(
             s.detail = format!("connessione a {addr}…");
         }
     });
-    let stream = connect(addr)?;
+    let stream = net::connect(addr)?;
+    let server_ip = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_default();
     let (mut reader, mut writer) = net::handshake(stream, cfg.secret.as_bytes(), false)?;
     let s = state.inj.screen();
     writer.send(Msg::Hello {
@@ -249,7 +236,12 @@ pub(crate) fn session(
     }
     state.side = side;
     log::info!("connesso a «{name}» ({addr}), questo PC è a {side:?} del server");
-    crate::status::set(crate::status::Phase::Connected, name, addr);
+    crate::status::update(|s| {
+        s.phase = crate::status::Phase::Connected;
+        s.peer = name;
+        s.peer_addr = server_ip;
+        s.detail = addr.to_string();
+    });
 
     let (tx, rx) = crossbeam_channel::unbounded();
     let epoch = Instant::now();

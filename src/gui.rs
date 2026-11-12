@@ -87,7 +87,11 @@ struct Form {
     name: String,
     edge_switch: bool,
     clipboard: bool,
+    /// Codice di abbinamento a 6 cifre (solo client).
+    code: String,
 }
+
+type PairResult = anyhow::Result<(String, String)>;
 
 struct App {
     path: PathBuf,
@@ -98,6 +102,8 @@ struct App {
     started: bool,
     show_secret: bool,
     scanning: Option<mpsc::Receiver<Vec<Found>>>,
+    pairing: Option<mpsc::Receiver<PairResult>>,
+    ips: (Vec<String>, f64),
     found: Option<Vec<Found>>,
     error: Option<String>,
     copied_at: Option<f64>,
@@ -176,11 +182,14 @@ impl App {
                 name: config::hostname(),
                 edge_switch: true,
                 clipboard: true,
+                code: String::new(),
             },
             cfg: None,
             started: false,
             show_secret: false,
             scanning: None,
+            pairing: None,
+            ips: (Vec::new(), -100.0),
             found: None,
             error: None,
             copied_at: None,
@@ -212,6 +221,7 @@ impl App {
             name: cfg.display_name(),
             edge_switch: cfg.server.edge_switch,
             clipboard: cfg.clipboard.enabled,
+            code: String::new(),
         };
     }
 
@@ -275,6 +285,36 @@ impl App {
         }
     }
 
+    /// IP di questo PC (aggiornati ogni pochi secondi).
+    fn local_ips(&mut self, ui: &egui::Ui) -> Vec<String> {
+        let now = ui.input(|i| i.time);
+        if now - self.ips.1 > 5.0 {
+            self.ips = (discovery::local_ips(), now);
+        }
+        self.ips.0.clone()
+    }
+
+    fn start_pairing(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let (server, code, name) = (
+            self.form.server.trim().to_string(),
+            self.form.code.clone(),
+            self.form.name.trim().to_string(),
+        );
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let addr = if server.contains(':') {
+                server
+            } else {
+                format!("{server}:{}", crate::protocol::DEFAULT_PORT)
+            };
+            let _ = tx.send(crate::pairing::pair(&addr, &code, &name));
+            ctx.request_repaint();
+        });
+        self.error = None;
+        self.pairing = Some(rx);
+    }
+
     fn copy(&mut self, ui: &egui::Ui, text: &str) {
         ui.ctx().copy_text(text.to_string());
         self.copied_at = Some(ui.input(|i| i.time));
@@ -294,6 +334,24 @@ impl App {
             return;
         };
         self.frames += 1;
+        // Stati finti per controllare la grafica senza un secondo PC.
+        if std::env::var("PONTE_SCREENSHOT_PHASE").as_deref() == Ok("listening") {
+            status::set(Phase::Listening, "", "");
+        }
+        if std::env::var_os("PONTE_SCREENSHOT_FOUND").is_some() && self.frames == 1 {
+            self.found = Some(vec![
+                Found {
+                    name: "fisso-ufficio".into(),
+                    addr: "192.168.1.10:24800".into(),
+                },
+                Found {
+                    name: "workstation".into(),
+                    addr: "192.168.1.23:24800".into(),
+                },
+            ]);
+            self.form.server = "192.168.1.10:24800".into();
+            self.form.code = "482913".into();
+        }
         ctx.request_repaint();
         if self.frames == 20 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
@@ -328,6 +386,20 @@ impl eframe::App for App {
                 }
                 self.found = Some(found);
                 self.scanning = None;
+            }
+        }
+        if let Some(rx) = &self.pairing {
+            if let Ok(res) = rx.try_recv() {
+                self.pairing = None;
+                match res {
+                    Ok((secret, server_name)) => {
+                        log::info!("abbinato con «{server_name}»");
+                        self.form.secret = secret;
+                        self.form.code.clear();
+                        self.save_and_start();
+                    }
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
             }
         }
         ui.ctx().request_repaint_after(Duration::from_millis(500));
@@ -706,6 +778,18 @@ impl App {
                 ui.label("Nome di questo PC");
                 ui.add(TextEdit::singleline(&mut self.form.name).desired_width(f32::INFINITY));
             });
+            let ips = self.local_ips(ui);
+            hint(
+                ui,
+                format!(
+                    "Indirizzo IP di questo PC: {}",
+                    if ips.is_empty() {
+                        "non rilevato".into()
+                    } else {
+                        ips.join(", ")
+                    }
+                ),
+            );
             ui.checkbox(
                 &mut self.form.clipboard,
                 "Condividi gli appunti (copia e incolla tra i PC)",
@@ -726,15 +810,30 @@ impl App {
         }
 
         ui.add_space(8.0);
-        let valid = self.form.secret.trim().len() >= 16
-            && (self.form.mode == Mode::Server || !self.form.server.trim().is_empty());
-        let label = if self.started {
+        let client = self.form.mode == Mode::Client;
+        let code_ok = crate::pairing::normalize(&self.form.code).is_some();
+        let valid = self.pairing.is_none()
+            && if client {
+                !self.form.server.trim().is_empty()
+                    && (code_ok || self.form.secret.trim().len() >= 16)
+            } else {
+                self.form.secret.trim().len() >= 16
+            };
+        let label = if self.pairing.is_some() {
+            "Abbinamento in corso…"
+        } else if client && code_ok {
+            "Abbina e avvia"
+        } else if self.started {
             "Salva e riavvia"
         } else {
             "Salva e avvia"
         };
         if primary_button(ui, label, valid) {
-            self.save_and_start();
+            if client && code_ok {
+                self.start_pairing(ui.ctx());
+            } else {
+                self.save_and_start();
+            }
         }
         if self.started
             && ui
@@ -774,28 +873,43 @@ impl App {
             );
         });
 
-        section(ui, "Codice segreto");
+        section(ui, "Abbinamento");
         card(ui, |ui| {
-            hint(ui, "Sull'altro PC incolla esattamente questo codice: protegge e cifra il collegamento.");
-            ui.horizontal(|ui| {
-                let w = ui.available_width() - 170.0;
-                ui.add(
-                    TextEdit::singleline(&mut self.form.secret)
-                        .font(TextStyle::Monospace)
-                        .desired_width(w),
+            hint(
+                ui,
+                "Dopo «Salva e avvia» la finestra mostrerà un codice di 6 cifre: \
+                 sull'altro PC basta inserire quello. Nient'altro da copiare.",
+            );
+            egui::CollapsingHeader::new(
+                RichText::new("Avanzate: codice segreto completo")
+                    .color(pal::MUTED)
+                    .size(13.0),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let w = ui.available_width() - 170.0;
+                    ui.add(
+                        TextEdit::singleline(&mut self.form.secret)
+                            .font(TextStyle::Monospace)
+                            .desired_width(w),
+                    );
+                    let secret = self.form.secret.clone();
+                    let label = if self.just_copied(ui) {
+                        "Copiato!"
+                    } else {
+                        "Copia"
+                    };
+                    if ui.button(label).clicked() {
+                        self.copy(ui, &secret);
+                    }
+                    if ui.button("Nuovo").clicked() {
+                        self.form.secret = crate::crypto::generate_secret();
+                    }
+                });
+                hint(
+                    ui,
+                    "Cambiandolo, i PC già abbinati dovranno abbinarsi di nuovo.",
                 );
-                let secret = self.form.secret.clone();
-                let label = if self.just_copied(ui) {
-                    "Copiato!"
-                } else {
-                    "Copia"
-                };
-                if ui.button(label).clicked() {
-                    self.copy(ui, &secret);
-                }
-                if ui.button("Nuovo").clicked() {
-                    self.form.secret = crate::crypto::generate_secret();
-                }
             });
         });
     }
@@ -831,9 +945,7 @@ impl App {
                 ),
                 Some(list) => {
                     for f in list.clone() {
-                        let selected = self.form.server.trim() == f.addr;
-                        let text = RichText::new(format!("{}   {}", f.name, f.addr));
-                        if ui.selectable_label(selected, text).clicked() {
+                        if server_row(ui, &f, self.form.server.trim() == f.addr) {
                             self.form.server = f.addr.clone();
                         }
                     }
@@ -842,15 +954,44 @@ impl App {
             }
         });
 
-        section(ui, "Codice segreto");
+        section(ui, "Codice di abbinamento");
         card(ui, |ui| {
-            hint(ui, "Incolla il codice mostrato dal server (sul server: «Codice segreto», poi «Copia»).");
-            ui.add(
-                TextEdit::singleline(&mut self.form.secret)
-                    .font(TextStyle::Monospace)
-                    .hint_text("codice del server")
-                    .desired_width(f32::INFINITY),
+            hint(
+                ui,
+                "Inserisci le 6 cifre mostrate nella finestra di Ponte sul server.",
             );
+            ui.add(
+                TextEdit::singleline(&mut self.form.code)
+                    .font(FontId::monospace(28.0))
+                    .hint_text("000 000")
+                    .char_limit(7)
+                    .align(Align2::CENTER_CENTER)
+                    .desired_width(200.0),
+            );
+            if self.pairing.is_some() {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label(RichText::new("Abbinamento con il server…").color(pal::MUTED));
+                });
+            } else if self.cfg.is_some() && self.form.secret.len() >= 16 {
+                hint(
+                    ui,
+                    "Questo PC è già abbinato: lascia vuoto per mantenere l'abbinamento attuale.",
+                );
+            }
+            egui::CollapsingHeader::new(
+                RichText::new("Avanzate: incolla il codice segreto completo")
+                    .color(pal::MUTED)
+                    .size(13.0),
+            )
+            .show(ui, |ui| {
+                ui.add(
+                    TextEdit::singleline(&mut self.form.secret)
+                        .font(TextStyle::Monospace)
+                        .hint_text("codice segreto del server")
+                        .desired_width(f32::INFINITY),
+                );
+            });
         });
     }
 
@@ -858,27 +999,21 @@ impl App {
         let st = status::get();
         let Some(cfg) = self.cfg.clone() else { return };
         let server = cfg.mode == Mode::Server;
-        let peer = if st.peer.is_empty() {
-            "altro PC".to_string()
-        } else {
-            st.peer.clone()
+        let peer = match (st.peer.is_empty(), st.peer_addr.is_empty()) {
+            (true, _) => "altro PC".to_string(),
+            (false, true) => st.peer.clone(),
+            (false, false) => format!("{} ({})", st.peer, st.peer_addr),
         };
+        let ips = self.local_ips(ui);
         let hotkey = "ScrollLock (o Ctrl destro + Shift destro)";
 
         let (title, sub): (String, String) = match (st.phase, server) {
             (Phase::Starting, _) => ("Avvio in corso…".into(), String::new()),
             (Phase::Listening, _) => (
                 "In attesa dell'altro PC".into(),
-                format!(
-                    "Sul client premi «Cerca in rete» oppure inserisci l'indirizzo {}.",
-                    if st.detail.is_empty() {
-                        "di questo PC".into()
-                    } else {
-                        st.detail.clone()
-                    }
-                ),
+                "Sull'altro PC scegli «Client», premi «Cerca in rete» e inserisci il codice qui sotto.".into(),
             ),
-            (Phase::Connecting, _) => ("Ricerca del server…".into(), st.detail.clone()),
+            (Phase::Connecting, _) => ("Collegamento al server…".into(), st.detail.clone()),
             (Phase::Connected, true) => (
                 format!("Collegato a «{peer}»"),
                 if cfg.server.edge_switch && !is_wayland() {
@@ -944,6 +1079,12 @@ impl App {
                         restart();
                     }
                 }
+                if st.phase == Phase::Connecting && (st.detail.contains("secret") || st.detail.contains("rifiutato")) {
+                    ui.label(
+                        RichText::new("Il server non riconosce questo PC: apri «Impostazioni» e inserisci di nuovo il codice di abbinamento.")
+                            .color(pal::AMBER),
+                    );
+                }
                 if let Some(rtt) = st.rtt_us {
                     ui.label(
                         RichText::new(format!("Latenza di rete {:.2} ms", rtt as f64 / 1000.0))
@@ -953,8 +1094,24 @@ impl App {
                 }
             });
 
+        if server {
+            let waiting = matches!(st.phase, Phase::Listening | Phase::Starting);
+            if waiting {
+                section(ui, "Abbina un nuovo PC");
+                card(ui, pairing_card);
+            } else {
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(RichText::new("Abbina un altro PC").color(pal::MUTED))
+                    .show(ui, |ui| card(ui, pairing_card));
+            }
+        }
+
         section(ui, "Dettagli");
-        let ip = discovery::local_ip().unwrap_or_else(|| "sconosciuto".into());
+        let ip = if ips.is_empty() {
+            "non rilevato".to_string()
+        } else {
+            ips.join(", ")
+        };
         card(ui, |ui| {
             egui::Grid::new("info")
                 .num_columns(2)
@@ -970,7 +1127,10 @@ impl App {
                     });
                     ui.end_row();
                     k(ui, "Questo PC");
-                    ui.label(format!("{}  ·  {ip}", cfg.display_name()));
+                    ui.label(cfg.display_name());
+                    ui.end_row();
+                    k(ui, "Indirizzo IP");
+                    ui.label(RichText::new(ip).monospace());
                     ui.end_row();
                     if server {
                         k(ui, "Porta");
@@ -981,7 +1141,11 @@ impl App {
                         ui.end_row();
                     } else {
                         k(ui, "Server");
-                        ui.label(cfg.server_addr());
+                        ui.label(if st.peer.is_empty() {
+                            cfg.server_addr()
+                        } else {
+                            format!("{}  ·  {}", st.peer, cfg.server_addr())
+                        });
                         ui.end_row();
                     }
                     k(ui, "Codice segreto");
@@ -1066,6 +1230,103 @@ impl App {
             });
         });
     }
+}
+
+/// Riga cliccabile di un server trovato in rete: nome e IP.
+fn server_row(ui: &mut egui::Ui, f: &Found, selected: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::click());
+    let p = ui.painter();
+    let fill = if selected {
+        pal::CYAN.gamma_multiply(0.16)
+    } else if resp.hovered() {
+        pal::CARD_HOVER
+    } else {
+        Color32::from_rgb(0x12, 0x16, 0x3B)
+    };
+    p.rect_filled(rect, CornerRadius::same(10), fill);
+    let stroke = if selected {
+        Stroke::new(1.5, pal::CYAN)
+    } else {
+        Stroke::new(1.0, pal::BORDER)
+    };
+    p.rect_stroke(rect, CornerRadius::same(10), stroke, StrokeKind::Inside);
+    paint_monitor(
+        p,
+        pos2(rect.left() + 26.0, rect.center().y + 2.0),
+        24.0,
+        pal::VIOLET,
+        pal::BG,
+    );
+    p.text(
+        pos2(rect.left() + 50.0, rect.center().y - 9.0),
+        Align2::LEFT_CENTER,
+        &f.name,
+        FontId::proportional(15.0),
+        pal::TEXT,
+    );
+    p.text(
+        pos2(rect.left() + 50.0, rect.center().y + 10.0),
+        Align2::LEFT_CENTER,
+        &f.addr,
+        FontId::monospace(12.5),
+        pal::MUTED,
+    );
+    if selected {
+        p.text(
+            pos2(rect.right() - 14.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            "selezionato",
+            FontId::proportional(12.5),
+            pal::CYAN,
+        );
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+/// Codice di abbinamento in grande, cifra per cifra.
+fn pairing_card(ui: &mut egui::Ui) {
+    let (code, left) = crate::pairing::current_code();
+    hint(
+        ui,
+        "Sull'altro PC: scegli «Client», premi «Cerca in rete», seleziona questo PC e inserisci:",
+    );
+    let (bw, bh, gap, mid) = (46.0, 62.0, 8.0, 18.0);
+    let total = 6.0 * bw + 4.0 * gap + mid;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), bh + 8.0), Sense::hover());
+    let p = ui.painter();
+    let mut x = rect.center().x - total / 2.0;
+    for (i, ch) in code.chars().enumerate() {
+        if i == 3 {
+            x += mid - gap;
+        }
+        let r = Rect::from_min_size(pos2(x, rect.top() + 4.0), vec2(bw, bh));
+        p.rect_filled(r, CornerRadius::same(10), pal::BG);
+        p.rect_stroke(
+            r,
+            CornerRadius::same(10),
+            Stroke::new(1.5, pal::INDIGO),
+            StrokeKind::Inside,
+        );
+        p.text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            ch,
+            FontId::monospace(32.0),
+            pal::TEXT,
+        );
+        x += bw + gap;
+    }
+    ui.vertical_centered(|ui| {
+        let mins = left.as_secs().div_ceil(60);
+        hint(
+            ui,
+            format!("Valido ancora {mins} min · cambia dopo l'uso o dopo 3 tentativi sbagliati"),
+        );
+        if ui.small_button("Nuovo codice").clicked() {
+            crate::pairing::new_code();
+        }
+    });
 }
 
 fn phase_badge(phase: Phase) -> (Color32, &'static str) {

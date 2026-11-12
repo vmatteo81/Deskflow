@@ -39,11 +39,16 @@ Avvia Ponte (doppio clic su `ponte.exe`, oppure **Ponte** dal menu applicazioni 
 Al primo avvio si apre la configurazione guidata:
 
 1. **Sul PC con mouse e tastiera** scegli **Server**, clicca dove si trova l'altro PC
-   (destra, sinistra, sopra, sotto) e premi **Copia** sul codice segreto.
-2. **Sull'altro PC** scegli **Client**, premi **Cerca in rete** e seleziona il server trovato
-   (oppure scrivi il suo IP), incolla il codice segreto.
-3. **Salva e avvia** su entrambi. La finestra mostra lo stato del collegamento, la latenza di rete
-   e il registro delle attività. Dal pulsante **Impostazioni** si cambia tutto in seguito.
+   (destra, sinistra, sopra, sotto) e premi **Salva e avvia**: compare un **codice di 6 cifre**.
+2. **Sull'altro PC** scegli **Client**, premi **Cerca in rete**, seleziona il server
+   (nome e IP) e digita le **6 cifre**. Premi **Abbina e avvia**.
+3. Fatto: i due PC si scambiano da soli il segreto lungo che cifra il collegamento.
+   La finestra mostra stato, nome e IP dei PC, latenza e registro attività;
+   da **Impostazioni** si cambia tutto in seguito.
+
+L'abbinamento usa SPAKE2: il codice non viaggia mai in rete e chi intercetta il traffico non può
+indovinarlo provando le combinazioni. Il codice scade dopo 10 minuti e cambia dopo l'uso o dopo
+3 tentativi sbagliati.
 
 La ricerca in rete usa la porta **UDP 24801**; il collegamento vero la **TCP 24800**.
 
@@ -53,13 +58,18 @@ Sul **server**:
 
 ```sh
 ponte init --mode server
+ponte run        # nel log compare: «codice di abbinamento: 482 913»
 ```
 
-Stampa il segreto generato. Sul **client**:
+Sul **client**:
 
 ```sh
-ponte init --mode client --server 192.168.1.10 --secret <SEGRETO-STAMPATO-DAL-SERVER>
+ponte pair --server 192.168.1.10 --code 482913
+ponte run
 ```
+
+In alternativa si può copiare a mano il segreto lungo:
+`ponte init --mode client --server 192.168.1.10 --secret <SEGRETO>`.
 
 Su Windows apri un terminale nella cartella dell'eseguibile e usa `.\ponte.exe init ...`.
 La configurazione sta in `~/.config/ponte/ponte.toml` (Linux) o `%APPDATA%\ponte\ponte.toml`
@@ -209,7 +219,8 @@ src/
   main.rs            CLI (gui, init, run, server, client, keys, devices)
   gui.rs             finestra: configurazione guidata e stato (egui)
   status.rs          stato condiviso motore → finestra, registro attività
-  discovery.rs       ricerca automatica del server in LAN (UDP)
+  discovery.rs       ricerca automatica del server in LAN (UDP), IP locali
+  pairing.rs         abbinamento con codice di 6 cifre (SPAKE2)
   config.rs          file TOML e validazione
   protocol.rs        messaggi binari
   crypto.rs net.rs   handshake, cifratura, trasporto a bassa latenza

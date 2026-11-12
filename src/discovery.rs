@@ -89,12 +89,62 @@ pub fn scan(timeout: Duration) -> Vec<Found> {
     found
 }
 
-/// IP con cui questo PC è raggiungibile in LAN (nessun pacchetto viene inviato).
-pub fn local_ip() -> Option<String> {
+/// IP della route predefinita (nessun pacchetto viene inviato).
+fn default_route_ip() -> Option<Ipv4Addr> {
     let s = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     s.connect((Ipv4Addr::new(8, 8, 8, 8), 53)).ok()?;
-    let ip = s.local_addr().ok()?.ip();
-    (!ip.is_unspecified()).then(|| ip.to_string())
+    match s.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
+/// Interfacce virtuali (Docker, macchine virtuali, WSL) che non servono in LAN.
+fn is_virtual(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "docker",
+        "br-",
+        "veth",
+        "virbr",
+        "vboxnet",
+        "vmnet",
+        "vethernet",
+        "virtualbox",
+        "vmware",
+        "hyper-v",
+        "wsl",
+    ]
+    .iter()
+    .any(|p| n.starts_with(p) || n.contains(p))
+}
+
+/// Tutti gli IPv4 utili di questo PC, prima quello della route predefinita.
+pub fn local_ips() -> Vec<String> {
+    let primary = default_route_ip();
+    let mut ips: Vec<Ipv4Addr> = primary.into_iter().collect();
+    if let Ok(list) = if_addrs::get_if_addrs() {
+        for itf in list {
+            if itf.is_loopback()
+                || itf.is_link_local()
+                || !itf.is_oper_up()
+                || is_virtual(&itf.name)
+            {
+                continue;
+            }
+            if let if_addrs::IfAddr::V4(v4) = itf.addr {
+                if !ips.contains(&v4.ip) {
+                    ips.push(v4.ip);
+                }
+            }
+        }
+    }
+    ips.iter().map(|ip| ip.to_string()).collect()
+}
+
+/// IP principale con cui questo PC è raggiungibile in LAN.
+pub fn local_ip() -> Option<String> {
+    local_ips().into_iter().next()
 }
 
 #[cfg(test)]
@@ -113,6 +163,15 @@ mod tests {
         );
         assert_eq!(parse(b"ALTRO\nx\n1", from), None);
         assert_eq!(parse(b"PONTE!1\nx\nporta", from), None);
+    }
+
+    #[test]
+    fn local_ips_are_usable() {
+        for ip in local_ips() {
+            let ip: Ipv4Addr = ip.parse().unwrap();
+            assert!(!ip.is_loopback() && !ip.is_unspecified());
+        }
+        assert!(is_virtual("docker0") && is_virtual("vEthernet (WSL)") && !is_virtual("wlo1"));
     }
 
     #[test]

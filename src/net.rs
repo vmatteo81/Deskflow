@@ -3,7 +3,7 @@
 //! e accorpa i movimenti in coda in un'unica write.
 
 use std::io::{BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -13,6 +13,45 @@ use crate::crypto::{self, Opener, Sealer, NONCE_LEN};
 use crate::protocol::{Msg, MAX_CLIPBOARD};
 
 const MAGIC: &[u8; 8] = b"PONTE\x00\x01\x00";
+/// Saluto iniziale di una richiesta di abbinamento (vedi `pairing.rs`).
+pub const PAIR_MAGIC: &[u8; 8] = b"PONTE\x00P1";
+
+/// Tipo di connessione in arrivo sul server.
+pub enum Incoming {
+    Session,
+    Pair,
+}
+
+/// Server: legge il saluto iniziale e capisce cosa vuole il client.
+pub fn read_magic(stream: &mut TcpStream) -> Result<Incoming> {
+    let mut m = [0u8; 8];
+    stream
+        .read_exact(&mut m)
+        .context("handshake: client muto")?;
+    match &m {
+        x if x == MAGIC => Ok(Incoming::Session),
+        x if x == PAIR_MAGIC => Ok(Incoming::Pair),
+        _ => bail!("il peer non parla il protocollo Ponte v1"),
+    }
+}
+
+/// Connessione TCP con timeout, provando tutti gli indirizzi risolti.
+pub fn connect(addr: &str) -> Result<TcpStream> {
+    let mut last = None;
+    for a in addr
+        .to_socket_addrs()
+        .with_context(|| format!("indirizzo non valido: {addr}"))?
+    {
+        match TcpStream::connect_timeout(&a, Duration::from_secs(3)) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Some(e),
+        }
+    }
+    match last {
+        Some(e) => Err(e).context("server non raggiungibile"),
+        None => bail!("nessun indirizzo per {addr}"),
+    }
+}
 const MAX_FRAME: usize = MAX_CLIPBOARD + 1024;
 /// Intervallo dei ping: se il peer tace per `DEAD_AFTER` la connessione è morta.
 pub const PING_EVERY: Duration = Duration::from_millis(1000);
@@ -74,32 +113,34 @@ pub fn tune(stream: &TcpStream) -> Result<()> {
 fn exchange(
     stream: &mut TcpStream,
     mine: &[u8; NONCE_LEN],
-    send_first: bool,
+    is_client: bool,
 ) -> Result<[u8; NONCE_LEN]> {
     let mut hello = Vec::with_capacity(MAGIC.len() + NONCE_LEN);
     hello.extend_from_slice(MAGIC);
     hello.extend_from_slice(mine);
-    let mut theirs = [0u8; MAGIC.len() + NONCE_LEN];
-    if send_first {
+    let mut n = [0u8; NONCE_LEN];
+    if is_client {
         stream.write_all(&hello)?;
+        let mut theirs = [0u8; MAGIC.len() + NONCE_LEN];
         stream
             .read_exact(&mut theirs)
             .context("handshake: nessuna risposta dal server")?;
+        if &theirs[..MAGIC.len()] != MAGIC {
+            bail!("il peer non parla il protocollo Ponte v1");
+        }
+        n.copy_from_slice(&theirs[MAGIC.len()..]);
     } else {
+        // Il server ha già letto il magic con `read_magic`.
         stream
-            .read_exact(&mut theirs)
+            .read_exact(&mut n)
             .context("handshake: client muto")?;
         stream.write_all(&hello)?;
     }
-    if &theirs[..MAGIC.len()] != MAGIC {
-        bail!("il peer non parla il protocollo Ponte v1");
-    }
-    let mut n = [0u8; NONCE_LEN];
-    n.copy_from_slice(&theirs[MAGIC.len()..]);
     Ok(n)
 }
 
 /// Esegue l'handshake e restituisce (lettore, scrittore) cifrati.
+/// Lato server va chiamato dopo `read_magic` che ha restituito `Session`.
 pub fn handshake(
     mut stream: TcpStream,
     secret: &[u8],
@@ -175,7 +216,8 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let srv = std::thread::spawn(move || {
-            let (s, _) = l.accept().unwrap();
+            let (mut s, _) = l.accept().unwrap();
+            assert!(matches!(read_magic(&mut s).unwrap(), Incoming::Session));
             let (mut r, mut w) = handshake(s, b"chiave", true).unwrap();
             let m = r.read_msg().unwrap();
             w.send(Msg::Pong(7)).unwrap();
@@ -193,7 +235,8 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let srv = std::thread::spawn(move || {
-            let (s, _) = l.accept().unwrap();
+            let (mut s, _) = l.accept().unwrap();
+            read_magic(&mut s).unwrap();
             let (mut r, _w) = handshake(s, b"giusto", true).unwrap();
             r.read_msg().is_err()
         });

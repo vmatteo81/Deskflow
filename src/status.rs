@@ -22,6 +22,8 @@ pub struct Status {
     pub phase: Phase,
     /// Nome dell'altro PC.
     pub peer: String,
+    /// IP dell'altro PC.
+    pub peer_addr: String,
     /// Dettaglio (indirizzo, messaggio d'errore, ...).
     pub detail: String,
     pub rtt_us: Option<u64>,
@@ -30,6 +32,7 @@ pub struct Status {
 static STATUS: Mutex<Status> = Mutex::new(Status {
     phase: Phase::Starting,
     peer: String::new(),
+    peer_addr: String::new(),
     detail: String::new(),
     rtt_us: None,
 });
@@ -65,6 +68,7 @@ pub fn set(phase: Phase, peer: impl Into<String>, detail: impl Into<String>) {
         }
         s.phase = phase;
         s.peer = peer;
+        s.peer_addr.clear();
         s.detail = detail;
     });
 }
