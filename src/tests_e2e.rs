@@ -143,7 +143,10 @@ fn server_to_client_over_real_tcp() {
         down: false,
         repeat: false,
     });
-    wait_until("tasti", || log.lock().unwrap().keys.len() == 2);
+    wait_until("tasti e clic", || {
+        let l = log.lock().unwrap();
+        l.keys.len() == 2 && l.buttons.len() == 2
+    });
     assert_eq!(log.lock().unwrap().keys, vec![(30, true), (30, false)]);
     assert_eq!(
         log.lock().unwrap().buttons,

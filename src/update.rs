@@ -240,8 +240,7 @@ pub fn install(rel: Release) {
         match res {
             Ok(exe) => {
                 log::info!("aggiornato alla versione {}: riavvio", rel.version);
-                let _ = std::process::Command::new(exe).spawn();
-                std::process::exit(0);
+                crate::instance::restart_with(exe);
             }
             Err(e) => {
                 log::error!("aggiornamento non riuscito: {e:#}");

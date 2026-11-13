@@ -23,6 +23,9 @@ pub struct Config {
     /// Nome mostrato all'altro PC (default: hostname).
     #[serde(default)]
     pub name: Option<String>,
+    /// Avvia Ponte all'accesso dell'utente (con la finestra ridotta).
+    #[serde(default = "yes")]
+    pub autostart: bool,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -31,6 +34,10 @@ pub struct Config {
     pub clipboard: ClipboardConfig,
     #[serde(default)]
     pub update: UpdateConfig,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -12,24 +12,26 @@ use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+    GetKeyboardLayout, MapVirtualKeyExW, SendInput, ToUnicodeEx, VkKeyScanExW, HKL, INPUT, INPUT_0,
+    INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MAPVK_VSC_TO_VK_EX,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
+    MOUSEEVENTF_XUP, MOUSEINPUT, VK_CONTROL, VK_LCONTROL, VK_LSHIFT, VK_MENU, VK_RMENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, SetCursorPos,
-    SetWindowsHookExW, TranslateMessage, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
-    LLKHF_INJECTED, LLMHF_INJECTED, LLMHF_LOWER_IL_INJECTED, MSG, MSLLHOOKSTRUCT,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WM_XBUTTONDOWN, WM_XBUTTONUP,
+    CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
+    GetSystemMetrics, GetWindowThreadProcessId, SetCursorPos, SetWindowsHookExW, TranslateMessage,
+    HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED,
+    LLMHF_LOWER_IL_INJECTED, MSG, MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use super::{Injector, Rect, ServerPlatform};
-use crate::keys::{self, KeySet, WinKey};
+use crate::keys::{self, CharKey, KeySet, Level, WinKey};
 use crate::protocol::Button;
 use crate::server::engine::{Engine, Input, Verdict};
 
@@ -69,6 +71,92 @@ fn cursor() -> Option<(i32, i32)> {
     (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
 }
 
+/// Layout di tastiera della finestra in primo piano (su Windows è per finestra).
+fn foreground_layout() -> HKL {
+    unsafe {
+        let tid = GetWindowThreadProcessId(GetForegroundWindow(), null_mut());
+        GetKeyboardLayout(tid)
+    }
+}
+
+/// Carattere prodotto dal tasto `code` col layout attivo.
+fn char_for(code: u16, level: Level) -> Option<char> {
+    let WinKey::Scan {
+        scan,
+        extended: false,
+    } = keys::evdev_to_win(code)?
+    else {
+        return None;
+    };
+    unsafe {
+        let hkl = foreground_layout();
+        let vk = MapVirtualKeyExW(scan as u32, MAPVK_VSC_TO_VK_EX, hkl);
+        if vk == 0 {
+            return None;
+        }
+        let mut state = [0u8; 256];
+        if level.shift {
+            state[VK_SHIFT as usize] = 0x80;
+            state[VK_LSHIFT as usize] = 0x80;
+        }
+        if level.altgr {
+            // AltGr per Windows è Ctrl+Alt.
+            for vk in [VK_CONTROL, VK_LCONTROL, VK_MENU, VK_RMENU] {
+                state[vk as usize] = 0x80;
+            }
+        }
+        let mut buf = [0u16; 8];
+        // Flag 4: non toccare lo stato dei tasti morti del sistema.
+        let n = ToUnicodeEx(
+            vk,
+            scan as u32,
+            state.as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+            4,
+            hkl,
+        );
+        if n <= 0 {
+            return None; // nessun carattere o tasto morto
+        }
+        let mut chars = char::decode_utf16(buf[..n as usize].iter().copied());
+        match (chars.next(), chars.next()) {
+            (Some(Ok(c)), None) => Some(c),
+            _ => None,
+        }
+    }
+}
+
+/// Tasto che produce `ch` col layout della finestra in primo piano.
+fn char_key(ch: char) -> Option<CharKey> {
+    let mut units = [0u16; 2];
+    let [u] = ch.encode_utf16(&mut units) else {
+        return None;
+    };
+    unsafe {
+        let hkl = foreground_layout();
+        let r = VkKeyScanExW(*u, hkl);
+        if r == -1 {
+            return None;
+        }
+        let vk = (r & 0xff) as u32;
+        let st = (r >> 8) & 0xff;
+        let (shift, ctrl, alt) = (st & 1 != 0, st & 2 != 0, st & 4 != 0);
+        if st & !7 != 0 || ctrl != alt {
+            return None;
+        }
+        let scan = MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, hkl);
+        let code = keys::win_to_evdev(vk, scan, false)?;
+        (keys::is_text_key(code) || code == 57).then_some(CharKey {
+            code,
+            level: Level {
+                shift,
+                altgr: ctrl && alt,
+            },
+        })
+    }
+}
+
 // ------------------------------------------------------------------ server
 
 type Slot = Arc<OnceLock<Arc<Engine>>>;
@@ -97,6 +185,9 @@ impl ServerPlatform for WinPlatform {
         }
     }
     fn capture(&self, _mice: bool, _keyboards: bool) {}
+    fn char_for(&self, code: u16, level: Level) -> Option<char> {
+        char_for(code, level)
+    }
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -337,5 +428,20 @@ impl Injector for SendInputInjector {
             Some(WinKey::Vk(vk)) => send(&[key_input(vk, 0, up)]),
             None => log::debug!("tasto {code} non mappato su Windows"),
         }
+    }
+
+    fn char_key(&mut self, ch: char) -> Option<CharKey> {
+        char_key(ch)
+    }
+
+    fn type_char(&mut self, ch: char) -> bool {
+        let mut units = [0u16; 2];
+        let mut inputs = Vec::with_capacity(4);
+        for u in ch.encode_utf16(&mut units).iter() {
+            inputs.push(key_input(0, *u, KEYEVENTF_UNICODE));
+            inputs.push(key_input(0, *u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+        }
+        send(&inputs);
+        true
     }
 }

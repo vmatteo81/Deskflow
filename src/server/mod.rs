@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 
-use crate::clipboard::{self, ClipHandle};
+use crate::clipboard::{self, Clip, ClipHandle};
 use crate::config::Config;
 use crate::net;
 use crate::platform;
@@ -32,7 +32,7 @@ pub fn run(cfg: Config) -> Result<()> {
 
     let clip = if cfg.clipboard.enabled {
         let e = engine.clone();
-        clipboard::start(&cfg.clipboard, move |text| e.send(Msg::Clipboard(text)))
+        clipboard::start(&cfg.clipboard, move |clip| e.send(clip_msg(clip)))
     } else {
         None
     };
@@ -122,6 +122,13 @@ fn bind_with_fallback(listen: &str) -> Result<TcpListener> {
     )
 }
 
+pub(crate) fn clip_msg(clip: Clip) -> Msg {
+    match clip {
+        Clip::Text(t) => Msg::Clipboard(t),
+        Clip::Image(png) => Msg::ClipboardImage(png),
+    }
+}
+
 pub(crate) fn handle_conn(
     stream: TcpStream,
     engine: &Engine,
@@ -181,7 +188,12 @@ pub(crate) fn handle_conn(
             Ok(Msg::Leave { along }) => engine.client_left(id, along),
             Ok(Msg::Clipboard(text)) => {
                 if let Some(c) = clip {
-                    c.apply_remote(text);
+                    c.apply_remote(Clip::Text(text));
+                }
+            }
+            Ok(Msg::ClipboardImage(png)) => {
+                if let Some(c) = clip {
+                    c.apply_remote(Clip::Image(png));
                 }
             }
             Ok(Msg::Ping(t)) => engine.send_to(id, Msg::Pong(t)),

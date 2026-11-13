@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::Sender;
 
-use crate::clipboard::{self, ClipHandle};
+use crate::clipboard::{self, Clip, ClipHandle};
 use crate::config::Config;
-use crate::keys::KeySet;
+use crate::keys::{self, KeySet};
 use crate::net;
 use crate::platform::{self, Injector};
 use crate::protocol::{along_to_frac, frac_to_along, Button, Msg, Side, VERSION};
@@ -77,13 +77,24 @@ impl ClientState {
             }
             Msg::Wheel { dx, dy } if self.active => self.inj.wheel(dx, dy),
             Msg::Key { code, down } => {
-                if down && self.active {
-                    self.keys.insert(code);
-                    self.inj.key(code, true);
-                } else if !down && self.keys.remove(code) {
-                    self.inj.key(code, false);
+                if keys::is_modifier(code) {
+                    // I modificatori restano premuti finché il server li rilascia.
+                    if down && self.active {
+                        if self.keys.insert(code) {
+                            self.inj.key(code, true);
+                        }
+                    } else if !down && self.keys.remove(code) {
+                        self.inj.key(code, false);
+                    }
+                } else if down && self.active {
+                    // Gli altri tasti si premono e rilasciano subito: la ripetizione
+                    // la decide il server (ogni sua ripetizione arriva come nuova
+                    // pressione), così un rilascio in ritardo sul Wi-Fi non fa
+                    // scattare l'autorepeat di questo PC.
+                    self.tap(code);
                 }
             }
+            Msg::Text { code, ch } if self.active => self.type_text(code, ch),
             Msg::Leave { .. } => {
                 self.release_all();
                 self.active = false;
@@ -93,6 +104,68 @@ impl ClientState {
                 let _ = out.send(Msg::Pong(t));
             }
             _ => {}
+        }
+    }
+
+    fn tap(&mut self, code: u16) {
+        self.inj.key(code, true);
+        self.inj.key(code, false);
+    }
+
+    /// Scrive `ch` col layout di questo PC: trova il tasto che lo produce,
+    /// sistema temporaneamente Shift/AltGr e lo preme.
+    fn type_text(&mut self, code: u16, ch: char) {
+        use keys::*;
+        let Some(ck) = self.inj.char_key(ch) else {
+            if !self.inj.type_char(ch) {
+                log::debug!("carattere {ch:?} non presente nel layout: invio il tasto {code}");
+                self.tap(code);
+            }
+            return;
+        };
+        let held: Vec<u16> = self.keys.iter().collect();
+        let shift_held = held
+            .iter()
+            .any(|k| matches!(*k, KEY_LEFTSHIFT | KEY_RIGHTSHIFT));
+        let altgr_held = held.contains(&KEY_RIGHTALT);
+        let release: Vec<u16> = held
+            .iter()
+            .copied()
+            .filter(|k| match *k {
+                KEY_LEFTSHIFT | KEY_RIGHTSHIFT => !ck.level.shift,
+                KEY_RIGHTALT => !ck.level.altgr,
+                // Ctrl/Alt (es. Ctrl+Alt usato come AltGr su Windows) e Win
+                // trasformerebbero il carattere in una scorciatoia.
+                _ => true,
+            })
+            .collect();
+        let needs_juggling = release
+            .iter()
+            .any(|k| !matches!(*k, KEY_LEFTSHIFT | KEY_RIGHTSHIFT | KEY_RIGHTALT));
+        // Dove si può scrivere Unicode diretto si evita di rilasciare Ctrl/Alt
+        // (su Windows un Alt premuto e rilasciato da solo apre i menu).
+        if needs_juggling && self.inj.type_char(ch) {
+            return;
+        }
+        let mut press = Vec::new();
+        if ck.level.shift && !shift_held {
+            press.push(KEY_LEFTSHIFT);
+        }
+        if ck.level.altgr && !altgr_held {
+            press.push(KEY_RIGHTALT);
+        }
+        for k in &release {
+            self.inj.key(*k, false);
+        }
+        for k in &press {
+            self.inj.key(*k, true);
+        }
+        self.tap(ck.code);
+        for k in press.iter().rev() {
+            self.inj.key(*k, false);
+        }
+        for k in release.iter().rev() {
+            self.inj.key(*k, true);
         }
     }
 
@@ -157,9 +230,9 @@ pub fn run(cfg: Config) -> Result<()> {
     let current: Arc<Mutex<Option<Sender<Msg>>>> = Arc::new(Mutex::new(None));
     let clip = if cfg.clipboard.enabled {
         let cur = current.clone();
-        clipboard::start(&cfg.clipboard, move |text| {
+        clipboard::start(&cfg.clipboard, move |clip| {
             if let Some(tx) = cur.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                let _ = tx.send(Msg::Clipboard(text));
+                let _ = tx.send(crate::server::clip_msg(clip));
             }
         })
     } else {
@@ -271,7 +344,12 @@ pub(crate) fn session(
         match reader.read_msg()? {
             Msg::Clipboard(text) => {
                 if let Some(c) = clip {
-                    c.apply_remote(text);
+                    c.apply_remote(Clip::Text(text));
+                }
+            }
+            Msg::ClipboardImage(png) => {
+                if let Some(c) = clip {
+                    c.apply_remote(Clip::Image(png));
                 }
             }
             Msg::Pong(t) => {
@@ -286,6 +364,7 @@ pub(crate) fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::{CharKey, Level};
     use crate::platform::Rect;
     use crossbeam_channel::unbounded;
 
@@ -297,7 +376,7 @@ mod tests {
         Wheel(i16, i16),
     }
 
-    struct Rec(Arc<Mutex<Vec<Ev>>>);
+    struct Rec(Arc<Mutex<Vec<Ev>>>, Vec<(char, CharKey)>);
 
     impl Injector for Rec {
         fn screen(&self) -> Rect {
@@ -323,11 +402,36 @@ mod tests {
         fn key(&mut self, c: u16, d: bool) {
             self.0.lock().unwrap().push(Ev::Key(c, d));
         }
+        fn char_key(&mut self, ch: char) -> Option<CharKey> {
+            self.1.iter().find(|(c, _)| *c == ch).map(|(_, k)| *k)
+        }
     }
 
     fn setup(side: Side) -> (ClientState, Arc<Mutex<Vec<Ev>>>) {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut s = ClientState::new(Box::new(Rec(log.clone())));
+        let layout = vec![
+            (
+                'a',
+                CharKey {
+                    code: 30,
+                    level: Level {
+                        shift: false,
+                        altgr: false,
+                    },
+                },
+            ),
+            (
+                '@',
+                CharKey {
+                    code: 39,
+                    level: Level {
+                        shift: false,
+                        altgr: true,
+                    },
+                },
+            ),
+        ];
+        let mut s = ClientState::new(Box::new(Rec(log.clone(), layout)));
         s.side = side;
         (s, log)
     }
@@ -425,6 +529,91 @@ mod tests {
             );
             assert_eq!(log.lock().unwrap()[0], expected);
         }
+    }
+
+    #[test]
+    fn keys_are_tapped_and_modifiers_held() {
+        let (mut c, log) = setup(Side::Right);
+        let (tx, _rx) = unbounded();
+        c.handle(
+            Msg::Enter {
+                along: 0,
+                center: true,
+            },
+            &tx,
+        );
+        log.lock().unwrap().clear();
+        let k = |code, down| Msg::Key { code, down };
+        c.handle(k(42, true), &tx); // Shift
+        c.handle(k(14, true), &tx); // Backspace
+        c.handle(k(14, true), &tx); // ripetizione del server
+        c.handle(k(14, false), &tx);
+        c.handle(k(42, false), &tx);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                Ev::Key(42, true),
+                Ev::Key(14, true),
+                Ev::Key(14, false),
+                Ev::Key(14, true),
+                Ev::Key(14, false),
+                Ev::Key(42, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_uses_local_layout_and_fixes_modifiers() {
+        let (mut c, log) = setup(Side::Right);
+        let (tx, _rx) = unbounded();
+        c.handle(
+            Msg::Enter {
+                along: 0,
+                center: true,
+            },
+            &tx,
+        );
+        log.lock().unwrap().clear();
+        // Ctrl+Alt+ò sul server (Windows) = '@': qui serve AltGr+ò senza Ctrl/Alt.
+        c.handle(
+            Msg::Key {
+                code: 29,
+                down: true,
+            },
+            &tx,
+        );
+        c.handle(
+            Msg::Key {
+                code: 56,
+                down: true,
+            },
+            &tx,
+        );
+        c.handle(Msg::Text { code: 40, ch: '@' }, &tx);
+        // Carattere assente dal layout: si ripiega sul tasto fisico.
+        c.handle(
+            Msg::Text {
+                code: 18, ch: '€'
+            },
+            &tx,
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                Ev::Key(29, true),
+                Ev::Key(56, true),
+                Ev::Key(29, false),
+                Ev::Key(56, false),
+                Ev::Key(100, true),
+                Ev::Key(39, true),
+                Ev::Key(39, false),
+                Ev::Key(100, false),
+                Ev::Key(56, true),
+                Ev::Key(29, true),
+                Ev::Key(18, true),
+                Ev::Key(18, false),
+            ]
+        );
     }
 
     #[test]

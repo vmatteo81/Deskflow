@@ -16,7 +16,9 @@ use evdev::{
     RelativeAxisType, UinputAbsSetup,
 };
 
+use super::xkb;
 use super::{Injector, Rect, ServerPlatform};
+use crate::keys::{CharKey, Level};
 use crate::protocol::Button;
 use crate::server::engine::{Engine, Input};
 
@@ -153,6 +155,7 @@ pub struct LinuxPlatform {
     devices: Mutex<Vec<DevEntry>>,
     grab_pointer: AtomicBool,
     grab_keyboard: AtomicBool,
+    keymap: xkb::Shared,
 }
 
 fn set_grab(fd: RawFd, on: bool) -> bool {
@@ -227,6 +230,10 @@ impl ServerPlatform for LinuxPlatform {
             }
         }
     }
+
+    fn char_for(&self, code: u16, level: Level) -> Option<char> {
+        self.keymap.char_for(code, level)
+    }
 }
 
 type Slot = Arc<OnceLock<Arc<Engine>>>;
@@ -250,6 +257,7 @@ pub fn start_capture(slot: Slot) -> Result<Arc<dyn ServerPlatform>> {
         devices: Mutex::new(Vec::new()),
         grab_pointer: AtomicBool::new(false),
         grab_keyboard: AtomicBool::new(false),
+        keymap: xkb::Shared::start(),
     });
 
     let found = scan(&plat, &slot);
@@ -553,6 +561,7 @@ pub struct UinputInjector {
     pointer: VirtualDevice,
     screen: Rect,
     wheel_acc: (i32, i32),
+    keymap: xkb::Shared,
 }
 
 impl UinputInjector {
@@ -613,6 +622,7 @@ impl UinputInjector {
             pointer,
             screen: Rect { x: 0, y: 0, w, h },
             wheel_acc: (0, 0),
+            keymap: xkb::Shared::start(),
         })
     }
 
@@ -695,6 +705,10 @@ impl Injector for UinputInjector {
         {
             log::warn!("uinput: {e}");
         }
+    }
+
+    fn char_key(&mut self, ch: char) -> Option<CharKey> {
+        self.keymap.char_key(ch)
     }
 }
 

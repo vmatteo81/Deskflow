@@ -1,12 +1,15 @@
 //! Astrazione sulle piattaforme: cattura dell'input (server) e iniezione
 //! (client). Il resto del programma non sa se gira su Linux o Windows.
 
+use crate::keys::{CharKey, Level};
 use crate::protocol::Button;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(target_os = "linux")]
+pub mod xkb;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -39,6 +42,12 @@ pub trait ServerPlatform: Send + Sync {
     /// Cattura in esclusiva mouse e/o tastiere (Linux: EVIOCGRAB).
     /// Su Windows gli hook decidono evento per evento, quindi è un no-op.
     fn capture(&self, mice: bool, keyboards: bool);
+    /// Carattere prodotto dal tasto `code` al `level` dato nel layout di
+    /// tastiera di questo PC (None = usare il tasto fisico).
+    fn char_for(&self, code: u16, level: Level) -> Option<char> {
+        let _ = (code, level);
+        None
+    }
 }
 
 /// Iniezione dell'input sul client.
@@ -50,6 +59,16 @@ pub trait Injector: Send {
     fn button(&mut self, button: Button, down: bool);
     fn wheel(&mut self, dx: i16, dy: i16);
     fn key(&mut self, code: u16, down: bool);
+    /// Quale tasto (e livello) produce `ch` nel layout di questo PC.
+    fn char_key(&mut self, ch: char) -> Option<CharKey> {
+        let _ = ch;
+        None
+    }
+    /// Scrive direttamente un carattere Unicode, se la piattaforma lo permette.
+    fn type_char(&mut self, ch: char) -> bool {
+        let _ = ch;
+        false
+    }
 }
 
 /// Mostra un errore bloccante (finestra di dialogo su Windows, stderr altrove).

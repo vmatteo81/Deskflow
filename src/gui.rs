@@ -52,7 +52,7 @@ fn is_wayland() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-pub fn run(path: PathBuf) -> anyhow::Result<()> {
+pub fn run(path: PathBuf, minimized: bool) -> anyhow::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Ponte")
         .with_app_id("ponte")
@@ -68,7 +68,7 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
     eframe::run_native(
         "Ponte",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, path)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, path, minimized)))),
     )
     .map_err(|e| anyhow!("interfaccia grafica non disponibile: {e}"))
 }
@@ -111,6 +111,10 @@ struct App {
     /// Nome del server ricevuto con l'abbinamento.
     paired_server: Option<String>,
     fw_checked: f64,
+    /// Avvio automatico: riduce la finestra appena è comparsa.
+    minimize_pending: bool,
+    /// Un'altra istanza ha chiesto di mostrare la finestra.
+    show_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn setup_style(ctx: &egui::Context) {
@@ -158,10 +162,18 @@ fn setup_style(ctx: &egui::Context) {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, path: PathBuf) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, path: PathBuf, minimized: bool) -> Self {
         setup_style(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         status::on_change(move || ctx.request_repaint());
+        let show_requested = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (ctx, flag) = (cc.egui_ctx.clone(), show_requested.clone());
+            crate::instance::on_show(move || {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                ctx.request_repaint();
+            });
+        }
 
         let logo = {
             let icon = eframe::icon_data::from_png_bytes(LOGO_PNG).expect("logo valido");
@@ -199,6 +211,8 @@ impl App {
             frames: 0,
             paired_server: None,
             fw_checked: -100.0,
+            minimize_pending: minimized,
+            show_requested,
         };
         if std::env::var("PONTE_SCREENSHOT_MODE").as_deref() == Ok("client") {
             app.form.mode = Mode::Client;
@@ -209,6 +223,7 @@ impl App {
             match Config::load(&path) {
                 Ok(cfg) => {
                     app.fill_form(&cfg);
+                    sync_autostart(cfg.autostart);
                     app.start(cfg);
                 }
                 Err(e) => app.error = Some(format!("{e:#}")),
@@ -259,6 +274,15 @@ impl App {
         self.view = View::Status;
     }
 
+    fn set_autostart(&mut self, on: bool) {
+        let Some(cfg) = self.cfg.as_mut() else { return };
+        cfg.autostart = on;
+        if let Err(e) = config::save(&self.path, cfg) {
+            self.error = Some(format!("{e:#}"));
+        }
+        sync_autostart(on);
+    }
+
     fn build_config(&self) -> anyhow::Result<Config> {
         let mut cfg = match &self.cfg {
             Some(c) => c.clone(),
@@ -291,6 +315,7 @@ impl App {
         {
             Ok(cfg) => {
                 self.error = None;
+                sync_autostart(cfg.autostart);
                 self.start(cfg);
             }
             Err(e) => self.error = Some(format!("{e:#}")),
@@ -298,6 +323,16 @@ impl App {
     }
 
     /// IP di questo PC (aggiornati ogni pochi secondi).
+    fn frames_minimize(&mut self, ctx: &egui::Context) {
+        // Si riduce dopo i primi frame: prima la finestra deve esistere davvero.
+        if ctx.cumulative_pass_nr() >= 2 {
+            self.minimize_pending = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        } else {
+            ctx.request_repaint();
+        }
+    }
+
     fn local_ips(&mut self, ui: &egui::Ui) -> Vec<String> {
         let now = ui.input(|i| i.time);
         if now - self.ips.1 > 5.0 {
@@ -383,10 +418,22 @@ impl App {
 }
 
 fn restart() {
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).spawn();
+    match std::env::current_exe() {
+        Ok(exe) => crate::instance::restart_with(exe),
+        Err(_) => std::process::exit(0),
     }
-    std::process::exit(0);
+}
+
+/// Allinea l'avvio automatico del sistema alla configurazione.
+fn sync_autostart(enabled: bool) {
+    if std::env::var_os("PONTE_SCREENSHOT").is_some() {
+        return;
+    }
+    std::thread::spawn(move || {
+        if let Err(e) = crate::autostart::set(enabled) {
+            log::warn!("avvio automatico: {e:#}");
+        }
+    });
 }
 
 impl eframe::App for App {
@@ -417,6 +464,17 @@ impl eframe::App for App {
         }
         ui.ctx().request_repaint_after(Duration::from_millis(500));
         self.debug_screenshot(ui.ctx());
+        if self.minimize_pending {
+            self.frames_minimize(ui.ctx());
+        }
+        if self
+            .show_requested
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
 
         egui::Panel::top("header")
             .frame(
@@ -1217,10 +1275,19 @@ impl App {
                     ui.end_row();
                     k(ui, "Appunti");
                     ui.label(if cfg.clipboard.enabled {
-                        "condivisi"
+                        "testo e immagini condivisi"
                     } else {
                         "non condivisi"
                     });
+                    ui.end_row();
+                    k(ui, "Avvio automatico");
+                    let mut on = cfg.autostart;
+                    if ui
+                        .checkbox(&mut on, "all'accesso, con la finestra ridotta")
+                        .changed()
+                    {
+                        self.set_autostart(on);
+                    }
                     ui.end_row();
                 });
         });
@@ -1267,7 +1334,10 @@ impl App {
                 }
             });
         });
-        hint(ui, "Chiudendo la finestra la condivisione si ferma.");
+        hint(
+            ui,
+            "Chiudendo la finestra la condivisione si ferma: riducila a icona per lasciarla attiva.",
+        );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             hint(ui, format!("Ponte {}", crate::update::CURRENT));

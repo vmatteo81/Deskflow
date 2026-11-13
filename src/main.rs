@@ -4,6 +4,7 @@
 // la CLI si riaggancia alla console del genitore (vedi `attach_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod autostart;
 mod client;
 mod clipboard;
 mod config;
@@ -11,6 +12,7 @@ mod crypto;
 mod discovery;
 mod firewall;
 mod gui;
+mod instance;
 // Tabelle Windows usate solo dalla build Windows (testate ovunque).
 #[cfg_attr(not(windows), allow(dead_code))]
 mod keys;
@@ -66,7 +68,11 @@ enum Cmd {
         force: bool,
     },
     /// Apre la finestra di Ponte (default quando non si passano comandi)
-    Gui,
+    Gui {
+        /// Parte con la finestra ridotta a icona (avvio automatico)
+        #[arg(long)]
+        minimized: bool,
+    },
     /// Avvia senza finestra secondo la `mode` del file di configurazione
     Run,
     /// Avvia come server (il PC con mouse e tastiera)
@@ -114,7 +120,7 @@ fn main() {
     platform::init_process();
     update::cleanup_previous();
 
-    let gui_mode = matches!(cli.cmd, None | Some(Cmd::Gui));
+    let gui_mode = matches!(cli.cmd, None | Some(Cmd::Gui { .. }));
     if let Err(e) = run(cli) {
         eprintln!("errore: {e:#}");
         if gui_mode {
@@ -138,11 +144,20 @@ fn run(cli: Cli) -> Result<()> {
     let path = cli.config.clone().unwrap_or_else(config::default_path);
     let cmd = match cli.cmd {
         Some(c) => c,
-        None if gui::available() => Cmd::Gui,
+        None if gui::available() => Cmd::Gui { minimized: false },
         None => Cmd::Run,
     };
+    // Due motori sullo stesso PC catturerebbero lo stesso input.
+    let engine = matches!(
+        cmd,
+        Cmd::Gui { .. } | Cmd::Run | Cmd::Server | Cmd::Client { .. }
+    );
+    if engine && !instance::acquire() {
+        log::info!("Ponte è già in esecuzione");
+        return Ok(());
+    }
     match cmd {
-        Cmd::Gui => gui::run(path),
+        Cmd::Gui { minimized } => gui::run(path, minimized),
         Cmd::Init {
             mode,
             server,

@@ -70,6 +70,27 @@ pub fn is_modifier(code: u16) -> bool {
     )
 }
 
+/// Tasti del blocco principale che producono un carattere (cifre, lettere,
+/// punteggiatura, il tasto `< >`). Spazio, tastierino e tasti di controllo
+/// restano tasti fisici.
+pub fn is_text_key(code: u16) -> bool {
+    matches!(code, 2..=13 | 16..=27 | 30..=41 | 43..=53 | 86)
+}
+
+/// Livello (modificatori) con cui un tasto produce un carattere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Level {
+    pub shift: bool,
+    pub altgr: bool,
+}
+
+/// Tasto fisico + livello che sul PC di destinazione produce un carattere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharKey {
+    pub code: u16,
+    pub level: Level,
+}
+
 /// Nomi accettati nella configurazione della hotkey.
 const NAMES: &[(&str, u16)] = &[
     ("Esc", 1),
@@ -311,6 +332,17 @@ mod tests {
         assert!(!s.remove(30));
         s.clear();
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn text_keys() {
+        assert!(is_text_key(30)); // A
+        assert!(is_text_key(39)); // ò
+        assert!(is_text_key(86)); // < >
+        assert!(!is_text_key(57)); // spazio
+        assert!(!is_text_key(28)); // Invio
+        assert!(!is_text_key(KEY_LEFTSHIFT));
+        assert!(!is_text_key(72)); // tastierino 8
     }
 
     #[test]

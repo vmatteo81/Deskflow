@@ -193,11 +193,36 @@ impl Engine {
         }
         if down {
             s.remote_keys.insert(code);
+            // Comanda il layout di questo PC: si invia il carattere, non il tasto.
+            if let Some(ch) = self.text_for(&s.pressed, code) {
+                send(s, Msg::Text { code, ch });
+                return Verdict::Swallow;
+            }
         } else if !s.remote_keys.remove(code) {
             return Verdict::Swallow;
         }
         send(s, Msg::Key { code, down });
         Verdict::Swallow
+    }
+
+    /// Carattere da scrivere sul client per `code`, se è digitazione e non
+    /// una scorciatoia (Ctrl+C, Alt+F, Win+E… restano tasti fisici).
+    fn text_for(&self, pressed: &KeySet, code: u16) -> Option<char> {
+        use crate::keys::*;
+        if !is_text_key(code) {
+            return None;
+        }
+        let any = |a: u16, b: u16| pressed.contains(a) || pressed.contains(b);
+        let shift = any(KEY_LEFTSHIFT, KEY_RIGHTSHIFT);
+        let ctrl = any(KEY_LEFTCTRL, KEY_RIGHTCTRL);
+        let lalt = pressed.contains(KEY_LEFTALT);
+        let altgr = pressed.contains(KEY_RIGHTALT) || (ctrl && lalt);
+        if any(KEY_LEFTMETA, KEY_RIGHTMETA) || (!altgr && (ctrl || lalt)) {
+            return None;
+        }
+        self.platform
+            .char_for(code, Level { shift, altgr })
+            .filter(|c| !c.is_control())
     }
 
     fn hotkey_hit(&self, pressed: &KeySet, code: u16) -> bool {
@@ -501,6 +526,7 @@ fn return_point(side: Side, b: Rect, f: f64) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::Level;
     use crossbeam_channel::{unbounded, Receiver};
 
     #[derive(Default)]
@@ -508,6 +534,8 @@ mod tests {
         pos: Mutex<Option<(i32, i32)>>,
         warps: Mutex<Vec<(i32, i32)>>,
         captures: Mutex<Vec<(bool, bool)>>,
+        /// Layout finto: (tasto, livello) → carattere.
+        layout: Vec<(u16, Level, char)>,
     }
 
     impl ServerPlatform for Fake {
@@ -528,10 +556,20 @@ mod tests {
         fn capture(&self, mice: bool, keyboards: bool) {
             self.captures.lock().unwrap().push((mice, keyboards));
         }
+        fn char_for(&self, code: u16, level: Level) -> Option<char> {
+            self.layout
+                .iter()
+                .find(|(c, l, _)| *c == code && *l == level)
+                .map(|(_, _, ch)| *ch)
+        }
     }
 
     fn setup() -> (Arc<Fake>, Engine, Receiver<Msg>) {
-        let fake = Arc::new(Fake::default());
+        setup_with(Fake::default())
+    }
+
+    fn setup_with(fake: Fake) -> (Arc<Fake>, Engine, Receiver<Msg>) {
+        let fake = Arc::new(fake);
         let e = Engine::new(
             fake.clone(),
             Settings {
@@ -740,6 +778,70 @@ mod tests {
                     down: true
                 },
                 Msg::Wheel { dx: 0, dy: 120 }
+            ]
+        );
+    }
+
+    #[test]
+    fn text_follows_server_layout_and_shortcuts_stay_physical() {
+        const PLAIN: Level = Level {
+            shift: false,
+            altgr: false,
+        };
+        const ALTGR: Level = Level {
+            shift: false,
+            altgr: true,
+        };
+        let (_f, e, rx) = setup_with(Fake {
+            layout: vec![(39, PLAIN, 'ò'), (39, ALTGR, '@'), (46, PLAIN, 'c')],
+            ..Fake::default()
+        });
+        key(&e, 70, true);
+        key(&e, 70, false);
+        drain(&rx);
+        // ò semplice e AltGr+ò = @
+        key(&e, 39, true);
+        key(&e, 39, false);
+        key(&e, 100, true);
+        key(&e, 39, true);
+        // la ripetizione automatica del server rimanda il carattere
+        e.input(Input::Key {
+            code: 39,
+            down: true,
+            repeat: true,
+        });
+        key(&e, 39, false);
+        key(&e, 100, false);
+        // Ctrl+Alt fa da AltGr come su Windows
+        key(&e, 29, true);
+        key(&e, 56, true);
+        key(&e, 39, true);
+        key(&e, 39, false);
+        key(&e, 56, false);
+        // Ctrl+C è una scorciatoia: tasto fisico
+        key(&e, 46, true);
+        key(&e, 46, false);
+        key(&e, 29, false);
+        let k = |code, down| Msg::Key { code, down };
+        let t = |code, ch| Msg::Text { code, ch };
+        assert_eq!(
+            drain(&rx),
+            vec![
+                t(39, 'ò'),
+                k(39, false),
+                k(100, true),
+                t(39, '@'),
+                t(39, '@'),
+                k(39, false),
+                k(100, false),
+                k(29, true),
+                k(56, true),
+                t(39, '@'),
+                k(39, false),
+                k(56, false),
+                k(46, true),
+                k(46, false),
+                k(29, false),
             ]
         );
     }

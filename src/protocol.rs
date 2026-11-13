@@ -4,7 +4,7 @@
 
 use anyhow::{bail, Result};
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const DEFAULT_PORT: u16 = 24800;
 /// Limite massimo per il testo degli appunti in un singolo messaggio.
 pub const MAX_CLIPBOARD: usize = 16 * 1024 * 1024;
@@ -110,7 +110,15 @@ pub enum Msg {
         code: u16,
         down: bool,
     },
+    /// server → client: il tasto `code` sul server (col suo layout) produce
+    /// il carattere `ch`. Il client scrive quel carattere, non il tasto fisico.
+    Text {
+        code: u16,
+        ch: char,
+    },
     Clipboard(String),
+    /// Immagine negli appunti (es. uno screenshot), codificata PNG.
+    ClipboardImage(Vec<u8>),
     Ping(u64),
     Pong(u64),
 }
@@ -127,6 +135,8 @@ mod tag {
     pub const CLIPBOARD: u8 = 9;
     pub const PING: u8 = 10;
     pub const PONG: u8 = 11;
+    pub const TEXT: u8 = 12;
+    pub const CLIPBOARD_IMAGE: u8 = 13;
 }
 
 impl Msg {
@@ -183,9 +193,18 @@ impl Msg {
                 out.extend_from_slice(&code.to_le_bytes());
                 out.push(*down as u8);
             }
+            Msg::Text { code, ch } => {
+                out.push(tag::TEXT);
+                out.extend_from_slice(&code.to_le_bytes());
+                out.extend_from_slice(&(*ch as u32).to_le_bytes());
+            }
             Msg::Clipboard(text) => {
                 out.push(tag::CLIPBOARD);
                 out.extend_from_slice(text.as_bytes());
+            }
+            Msg::ClipboardImage(png) => {
+                out.push(tag::CLIPBOARD_IMAGE);
+                out.extend_from_slice(png);
             }
             Msg::Ping(t) => {
                 out.push(tag::PING);
@@ -256,6 +275,20 @@ impl Msg {
                     bail!("appunti troppo grandi");
                 }
                 return Ok(Msg::Clipboard(String::from_utf8(rest.to_vec())?));
+            }
+            tag::CLIPBOARD_IMAGE => {
+                if rest.len() > MAX_CLIPBOARD {
+                    bail!("immagine negli appunti troppo grande");
+                }
+                return Ok(Msg::ClipboardImage(rest.to_vec()));
+            }
+            tag::TEXT => {
+                let code = r.u16()?;
+                let v = r.u32()?;
+                let Some(ch) = char::from_u32(v) else {
+                    bail!("carattere non valido {v:#x}")
+                };
+                Msg::Text { code, ch }
             }
             tag::PING => Msg::Ping(r.u64()?),
             tag::PONG => Msg::Pong(r.u64()?),
@@ -372,6 +405,11 @@ mod tests {
         });
         roundtrip(Msg::Clipboard("ciao è€ 🚀".into()));
         roundtrip(Msg::Clipboard(String::new()));
+        roundtrip(Msg::ClipboardImage(vec![0x89, b'P', b'N', b'G', 0, 255]));
+        roundtrip(Msg::Text { code: 39, ch: '@' });
+        roundtrip(Msg::Text {
+            code: 18, ch: '€'
+        });
         roundtrip(Msg::Ping(u64::MAX));
         roundtrip(Msg::Pong(42));
     }
@@ -383,6 +421,8 @@ mod tests {
         assert!(Msg::decode(&[tag::MOVE, 1]).is_err());
         assert!(Msg::decode(&[tag::LEAVE, 1, 2, 3]).is_err());
         assert!(Msg::decode(&[tag::BUTTON, 9, 1]).is_err());
+        // Surrogato UTF-16: non è un carattere valido.
+        assert!(Msg::decode(&[tag::TEXT, 1, 0, 0x00, 0xD8, 0, 0]).is_err());
     }
 
     #[test]

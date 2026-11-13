@@ -8,7 +8,7 @@
 # Ponte
 
 Usa **un solo mouse e una sola tastiera su due PC** (Linux e Windows, in qualsiasi combinazione)
-e **copia/incolla testo in entrambe le direzioni**. Porti il cursore oltre il bordo dello schermo
+e **copia/incolla testo e immagini (screenshot) in entrambe le direzioni**. Porti il cursore oltre il bordo dello schermo
 e continui a lavorare sull'altro computer.
 
 - Scritto in **Rust**, thread nativi con I/O bloccante (nessun runtime async), TCP con Nagle
@@ -18,7 +18,9 @@ e continui a lavorare sull'altro computer.
   che su **Wayland** (GNOME, KDE, …).
 - **Windows**: hook low-level di sistema + `SendInput`, consapevole del DPI (scaling 125/150%).
 - **Cifrato**: ChaCha20-Poly1305 con chiavi di sessione derivate da un segreto condiviso.
-- Tasti trasmessi come **tasti fisici**: il layout (italiano, US, …) è quello del PC che riceve.
+- **Comanda la tastiera di origine**: il carattere che scrivi è quello del layout del PC con la
+  tastiera (italiano, US, …), anche se l'altro PC ha un layout diverso. Scorciatoie (Ctrl+C,
+  Alt+Tab, Win+E…), frecce e tasti funzione viaggiano come tasti fisici.
 
 ## Come si usa
 
@@ -105,7 +107,12 @@ ponte          # apre la finestra (configurazione guidata al primo avvio)
 ponte run      # senza finestra, secondo la `mode` del file di configurazione
 ```
 
-Su Linux, per l'avvio automatico con la sessione (senza finestra):
+**Avvio automatico:** di default Ponte parte all'accesso con la finestra ridotta a icona
+(casella «Avvio automatico» nella finestra; Windows: chiave `Run` dell'utente, Linux:
+`~/.config/autostart/ponte.desktop`). Se Ponte è già aperto, lanciarlo di nuovo mostra la finestra
+esistente invece di avviare un secondo motore.
+
+In alternativa su Linux, senza finestra, c'è il servizio utente (in quel caso disattiva la casella):
 
 ```sh
 systemctl --user enable --now ponte
@@ -134,10 +141,16 @@ systemctl --user enable --now ponte
 
 Mentre tieni premuto un tasto del mouse (trascinamento) lo schermo non cambia.
 
+La ripetizione dei tasti tenuti premuti la decide il PC con la tastiera: sul client ogni tasto
+(esclusi Shift, Ctrl, Alt, Win) viene premuto e rilasciato subito. Così un rilascio arrivato in
+ritardo, per esempio su Wi-Fi, non fa più ripetere all'infinito una lettera.
+
 ## Appunti
 
 Il testo copiato su un PC è subito disponibile per incollarlo sull'altro, in entrambe le direzioni
-(controllo ogni 200 ms, configurabile). Si può disattivare con `[clipboard] enabled = false`.
+(controllo ogni 200 ms, configurabile). Anche le **immagini** (es. uno screenshot con Stamp o
+Win+Shift+S) passano all'altro PC, come PNG fino a `max_bytes`. Si può disattivare tutto con
+`[clipboard] enabled = false`.
 
 ## Configurazione completa
 
@@ -245,10 +258,13 @@ src/
   protocol.rs        messaggi binari
   crypto.rs net.rs   handshake, cifratura, trasporto a bassa latenza
   keys.rs            keycode, nomi hotkey, scancode Windows
-  clipboard.rs       sincronizzazione appunti senza eco
+  clipboard.rs       sincronizzazione appunti (testo e immagini) senza eco
+  autostart.rs       avvio automatico all'accesso
+  instance.rs        istanza unica (rilanciare mostra la finestra esistente)
   server/engine.rs   logica di commutazione (testata senza hardware)
   client.rs          iniezione e bordo di ritorno
   platform/linux.rs  evdev, uinput, touchpad, X11
+  platform/xkb.rs    layout di tastiera Linux (libxkbcommon)
   platform/windows.rs hook low-level, SendInput, DPI
 assets/              logo (SVG sorgente, PNG, ICO)
 packaging/           .desktop, regola udev, servizio systemd utente, manifest Windows
