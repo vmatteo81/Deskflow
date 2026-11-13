@@ -222,6 +222,7 @@ pub enum WinKey {
 
 const VK_PAUSE: u32 = 0x13;
 const VK_NUMLOCK: u32 = 0x90;
+const VK_RSHIFT: u32 = 0xA1;
 
 /// Scancode con prefisso E0 → keycode evdev.
 const EXTENDED: &[(u16, u16)] = &[
@@ -275,6 +276,11 @@ pub fn win_to_evdev(vk: u32, scan: u32, extended: bool) -> Option<u16> {
     }
     if vk == VK_NUMLOCK {
         return Some(KEY_NUMLOCK);
+    }
+    // L'hook LL marca lo Shift destro come "esteso" (scancode 0x36): senza
+    // questo caso veniva scartato e Shift destro + tasto arrivava senza Shift.
+    if vk == VK_RSHIFT {
+        return Some(KEY_RIGHTSHIFT);
     }
     let scan = scan as u16;
     if extended {
@@ -384,6 +390,9 @@ mod tests {
                 extended: true
             })
         );
+        // Shift destro: l'hook lo segnala come esteso, con o senza flag è 54.
+        assert_eq!(win_to_evdev(0xA1, 0x36, true), Some(KEY_RIGHTSHIFT));
+        assert_eq!(win_to_evdev(0xA1, 0x36, false), Some(KEY_RIGHTSHIFT));
         // Shift "finto" che Windows genera col tastierino: va ignorato.
         assert_eq!(win_to_evdev(0xA0, 0x2A, true), None);
     }
